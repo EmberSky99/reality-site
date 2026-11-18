@@ -1,5 +1,7 @@
 # REALITY 本机 HTTPS 网站一键部署
 
+[![Linux compatibility](https://github.com/tinkerlab-tech/reality-site/actions/workflows/compatibility.yml/badge.svg)](https://github.com/tinkerlab-tech/reality-site/actions/workflows/compatibility.yml)
+
 为 VLESS＋REALITY 搭建本机 HTTPS 目标网站。中文交互、网页内置，证书由 Caddy 自动申请和续期。节点协议和入站通过 3X-UI 配置。
 
 ## 下载并运行
@@ -100,6 +102,16 @@ ss -lntp 'sport = :80'
 没有证书验证任务或其他 HTTP 服务时，80 应只显示表头。证书问题先检查域名全部 A/AAAA、公网 80 可达性和 CAA；Caddy 会自动重试，无须反复安装或强制重签。
 
 ## 验证范围
+
+### GitHub Actions 自动兼容测试
+
+[查看每个系统的真实测试日志](https://github.com/tinkerlab-tech/reality-site/actions/workflows/compatibility.yml)。修改脚本或测试后自动运行，也可在Actions中选择Linux compatibility → Run workflow手动运行。
+
+- **42个安装任务**：21种系统版本 × x86_64/ARM64，使用对应发行版容器和原生架构运行器。补齐文档要求的基础工具后，调用实际安装函数安装Caddy，检查服务用户与服务文件、验证生产配置，并用本地CA测试TLS 1.3、HTTP/2和网页内容。
+- **3个systemd任务**：在Ubuntu 22.04/24.04/26.04临时虚拟机中，实际安装、启动、重载服务；验证重复运行保留自定义网页及同一证书，并运行本地回归测试。
+- 容器测试不伪造systemd运行状态；各RPM系统的完整服务启动、SELinux、公网HTTP-01及真实自动续期仍需另测。RHEL暂未加入真实镜像矩阵，不能把其衍生系统的结果算作RHEL实测。
+- Debian 11的默认镜像软件源已出现404；CI明确使用Debian官方签名归档源准备该环境，再测试安装。部署脚本不自动改源，因此这项结果只适用于软件源已经可用的Debian 11。
+- 所有证书测试使用本地CA，不使用用户域名、账号、VPS或正式证书额度。具体通过/失败以对应提交的Actions结果为准，流程文件存在不代表测试已通过。
 
 发布前审查已修复：确认期间配置变动被覆盖、误认其他同名Caddy进程、前导零端口校验不一致，以及服务配置路径的部分匹配问题。现在会在持锁后重新核对配置与部署记录，并按systemd MainPID确认监听归属。
 

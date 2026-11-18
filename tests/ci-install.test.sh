@@ -41,11 +41,27 @@ fi
 # Official base containers are smaller than VPS images. Install the documented
 # prerequisite tools, not Caddy; its packages come from the production function.
 if [[ "$FAMILY" == apt ]]; then
+    if [[ "$ID" == debian && "$VERSION_ID" == 11 ]]; then
+        # Debian 11 has reached the archive. This is explicit CI preparation,
+        # not a source migration performed by the public deployment script.
+        printf '%s\n' \
+            'deb [check-valid-until=no] http://archive.debian.org/debian bullseye main' \
+            'deb [check-valid-until=no] http://archive.debian.org/debian-security bullseye-security main' \
+            > /etc/apt/sources.list
+        rm -f /etc/apt/sources.list.d/debian.sources
+        printf 'CI prerequisite: Debian 11 uses signed Debian archive repositories; production script does not switch sources.\n'
+    fi
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         systemd iproute2 util-linux gawk coreutils libc-bin openssl python3 ca-certificates
 else
-    "$(dnf_command)" install -y systemd iproute util-linux gawk coreutils glibc-common openssl python3 ca-certificates
+    packages=(systemd iproute util-linux gawk glibc-common openssl python3 ca-certificates diffutils)
+    # EL minimal images provide these commands through coreutils-single. Do not
+    # replace that working package merely to prepare a test environment.
+    for tool in sha256sum install timeout; do
+        if ! has "$tool"; then packages+=(coreutils); break; fi
+    done
+    "$(dnf_command)" install -y "${packages[@]}"
 fi
 DOMAIN=ci.example.test
 LOCAL_PORT=18443
@@ -81,8 +97,7 @@ text = pathlib.Path(sys.argv[1]).read_text()
 old = 'issuer acme {\n            disable_tlsalpn_challenge\n        }'
 assert text.count(old) == 1
 text = text.replace(old, 'issuer internal')
-text = text.replace('auto_https disable_redirects', '''admin off
-    skip_install_trust
+text = text.replace('auto_https disable_redirects', '''skip_install_trust
     storage file_system /var/lib/caddy/ci-storage
     auto_https disable_redirects''', 1)
 pathlib.Path(sys.argv[2]).write_text(text)
