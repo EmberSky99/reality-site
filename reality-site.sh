@@ -222,7 +222,7 @@ ask_settings() {
     fi
     printf '证书固定使用 HTTP-01，由 Caddy 自动申请和续期；验证时临时监听80，用完释放。\n'
     printf '网站不提供常驻HTTP网页或HTTP跳转。\n'
-    printf '公网 TCP 443 由 Xray 使用；已有 443 监听属于本次可接受状态。\n'
+    printf '公网 TCP 443 预留给 Xray；REALITY 入站需在 3X-UI 中配置。\n'
     printf '不会修改 SSH、防火墙、安全组、Xray、3X-UI 或系统网络参数。\n'
     printf '请确认：用于访问网站的 A/AAAA 指向本机，已关闭 CDN 代理。\n'
     printf 'HTTP 验证要求公网 TCP 80 确实可达，续期时也需要保持可用。\n'
