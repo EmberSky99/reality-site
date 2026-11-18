@@ -1,0 +1,9 @@
+*.pem
+*.key
+*.db
+*.db-*
+*.env
+.env*
+*.log
+*.bak
+reality-site.state
