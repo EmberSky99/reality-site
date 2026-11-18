@@ -12,6 +12,7 @@ import ipaddress
 import json
 import pathlib
 import socket
+import socketserver
 import subprocess
 import sys
 import tempfile
@@ -45,10 +46,6 @@ def main():
     except OSError:
         print("SKIP IPv6: unavailable in this test environment")
 
-    ports = set()
-    while len(ports) < 2:
-        ports.add(free_port())
-    http_port, tls_port = sorted(ports)
     domain, token = "reality-ci.example.com", "http01-listener-check"
     complete = threading.Event()
     state = {"thumbprint": None, "error": None, "checks": []}
@@ -113,14 +110,22 @@ def main():
                 self.reply({"type": "urn:ietf:params:acme:error:connection", "detail": repr(error)}, 400)
                 complete.set()
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    # EL8's default Python is 3.6, before ThreadingHTTPServer/text=True existed.
+    class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+
+    server = Server(("127.0.0.1", 0), Handler)
+    ports = set()
+    while len(ports) < 2:
+        ports.add(free_port())
+    http_port, tls_port = sorted(ports)
     origin = "http://127.0.0.1:" + str(server.server_port)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     with tempfile.TemporaryDirectory(prefix="reality-http01-") as temporary:
         work = pathlib.Path(temporary)
-        production = subprocess.check_output(["bash", "-c", 'source "$1"; write_caddyfile "$2" "$3"', "bash", script, domain, str(tls_port)], text=True)
-        adapted = subprocess.check_output([caddy, "adapt", "--adapter", "caddyfile", "--config", "-"], input=production, text=True)
+        production = subprocess.check_output(["bash", "-c", 'source "$1"; write_caddyfile "$2" "$3"', "bash", script, domain, str(tls_port)], universal_newlines=True)
+        adapted = subprocess.check_output([caddy, "adapt", "--adapter", "caddyfile", "--config", "-"], input=production, universal_newlines=True)
         config = json.loads(adapted)
         config["admin"] = {"disabled": True}
         config["storage"] = {"module": "file_system", "root": str(work / "storage")}
