@@ -50,7 +50,7 @@ printf 'PASS 发行版/版本及架构分支（不代表各系统完整安装已
 # Exercise the RPM installation path without running a package manager. The
 # simulated backend rejects a DNF4/DNF5 plugin mismatch and wrong COPR build.
 # Mock functions are called indirectly through the sourced installer's commands.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 for entry in 'fedora|43|dnf|x86_64|fedora-43-x86_64' \
     'fedora|45|dnf5|aarch64|fedora-45-aarch64' \
     'ol|8.10|dnf|aarch64|epel-8-aarch64' 'ol|9.6|dnf|x86_64|epel-9-x86_64' \
@@ -100,7 +100,7 @@ for entry in 'fedora|43|dnf|x86_64|fedora-43-x86_64' \
         [[ $(cat "$ACTIONS") == $'dependencies\nrepository\ncaddy' ]]
     )
 done
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 (
     FAMILY=dnf ID=ol VERSION_ID=9 MANAGED=0
     has() { return 1; }
