@@ -89,7 +89,7 @@ valid_domain() {
 }
 
 valid_port() {
-    [[ "$1" =~ ^[0-9]{4,5}$ ]] || return 1
+    [[ "$1" =~ ^[1-9][0-9]{3,4}$ ]] || return 1
     (( 10#$1 >= 1024 && 10#$1 <= 65535 )) || return 1
     [[ "$1" != 2019 ]]
 }
@@ -125,7 +125,7 @@ ask_local_port() {
         read -r -p "本机 HTTPS 端口 [$recommended]：" answer
         answer=${answer:-$recommended}
         if ! valid_port "$answer"; then
-            printf '端口需为 1024–65535，且不能是 Caddy 管理端口 2019，请重新填写。\n'
+            printf '端口需为 1024–65535、不带前导零，且不能是 Caddy 管理端口 2019，请重新填写。\n'
             continue
         fi
         if port_busy "$answer"; then
@@ -180,14 +180,29 @@ check_ownership() {
     fi
 }
 
+managed_caddy_owns_listeners() {
+    local listeners="$1" service_pid listener_pid found=0
+    (( MANAGED )) || return 1
+    service_pid=$(systemctl show caddy -p MainPID --value 2>/dev/null) || return 1
+    [[ "$service_pid" =~ ^[1-9][0-9]*$ && "$listeners" == *'"caddy"'* ]] || return 1
+    # A matching process name alone is insufficient: every reported owner must
+    # be the main process of the systemd service we are about to reload.
+    while [[ "$listeners" =~ pid=([0-9]+) ]]; do
+        listener_pid=${BASH_REMATCH[1]}
+        [[ "$listener_pid" == "$service_pid" ]] || return 1
+        found=1
+        listeners=${listeners#*"pid=$listener_pid"}
+    done
+    (( found ))
+}
+
 check_available() {
     local port lines
     local -a ports=(80 "$LOCAL_PORT" 2019)
     for port in "${ports[@]}"; do
         lines=$(port_lines "$port")
         [[ -n "$lines" ]] || continue
-        if (( MANAGED )) && [[ "$lines" == *'"caddy"'* ]] &&
-            ! printf '%s\n' "$lines" | awk '!/users:\(\("caddy"/ {found=1} END {exit !found}'; then
+        if managed_caddy_owns_listeners "$lines"; then
             continue
         fi
         printf '%s\n' "$lines" >&2
@@ -408,12 +423,13 @@ HTML
 
 apply_site() {
     local active=0 exec_start config_dir
+    local config_arg_re='(^|[[:space:]])--config(=|[[:space:]]+)/etc/caddy/Caddyfile([[:space:];]|$)'
     config_dir=$(dirname "$CONFIG")
     id caddy >/dev/null 2>&1 || die 'Caddy 软件包没有创建 caddy 用户。'
     # Unmask does not start the service; it makes its installed ExecStart visible.
     unmask_install_caddy
     exec_start=$(systemctl show caddy -p ExecStart --value)
-    [[ "$exec_start" == *'/etc/caddy/Caddyfile'* ]] || die 'caddy.service 使用了不同的配置路径，需要人工确认。'
+    [[ "$exec_start" =~ $config_arg_re ]] || die 'caddy.service 使用了不同的配置路径，需要人工确认。'
     install -d -m 755 "$config_dir" "$WEBROOT"
     write_caddyfile "$DOMAIN" "$LOCAL_PORT" "$EMAIL" "$WEBROOT" > "$STAGE/Caddyfile"
     caddy fmt --overwrite "$STAGE/Caddyfile"
@@ -496,11 +512,26 @@ verify_site() {
 }
 
 deploy() {
+    local expected_managed expected_config_hash='' expected_state_hash=''
     check_platform
     check_ownership
+    expected_managed=$MANAGED
+    if (( MANAGED )); then
+        expected_config_hash=$(sha256sum "$CONFIG" | awk '{print $1}')
+        expected_state_hash=$(sha256sum "$STATE" | awk '{print $1}')
+    fi
     ask_settings
     exec 9>"$LOCK_FILE"
     flock -n 9 || die '另一份部署器正在运行。'
+    # Prompts may take minutes. Re-check ownership after acquiring the lock, so
+    # a manual edit or a completed concurrent deployment cannot be overwritten.
+    check_ownership
+    [[ "$MANAGED" == "$expected_managed" ]] || die '等待确认期间部署状态发生变化，请重新运行后核对。'
+    if (( MANAGED )); then
+        [[ "$(sha256sum "$CONFIG" | awk '{print $1}')" == "$expected_config_hash" &&
+           "$(sha256sum "$STATE" | awk '{print $1}')" == "$expected_state_hash" ]] ||
+            die '等待确认期间配置或部署记录发生变化，本次已停止，请重新运行后核对。'
+    fi
     check_available
     umask 077
     STAGE=$(mktemp -d /tmp/reality-site.XXXXXXXX)

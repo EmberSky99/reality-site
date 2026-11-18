@@ -87,6 +87,16 @@ ss -lntp 'sport = :80'
 
 ## 验证范围
 
+发布前审查已修复：确认期间配置变动被覆盖、误认其他同名Caddy进程、前导零端口校验不一致，以及服务配置路径的部分匹配问题。现在会在持锁后重新核对配置与部署记录，并按systemd MainPID确认监听归属。
+
+仓库包含[本地回归测试](tests/reality-site.test.sh)。开发者在Linux上准备Caddy和ShellCheck后可运行：
+
+```bash
+bash tests/reality-site.test.sh /path/to/caddy /path/to/shellcheck
+```
+
+测试使用临时目录、本地CA和模拟systemd操作，不连接VPS、不申请公网证书。安装中断、各发行版完整安装、SELinux及真实证书自动续期仍需实机验证。
+
 本地已通过 Bash/ShellCheck、系统版本分类、端口冲突、预装 Caddy 退出、重复运行、配置失败恢复，以及真实 Caddy 的 TLS 1.3、HTTP/2 和网页 200。使用本地 CA 的升级测试已验证 HTTP 端口释放及原证书复用。
 
 旧版曾在 Debian 13/amd64 完成真实安装、HTTP-01 正式签发和本机 HTTPS 验证。当前精简版已有用户初步测试正常的反馈；后续自动续期、各发行版的完整安装及SELinux仍待进一步实机验证。
