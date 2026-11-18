@@ -352,6 +352,10 @@ assert all(not s['automatic_https'].get('disable') and not s['automatic_https'].
 assert all('h3' not in s['protocols'] for s in servers)
 assert any('example.com' in p['subjects'] for p in c['apps']['tls']['automation']['policies'])
 assert any(i.get('challenges',{}).get('tls-alpn',{}).get('disabled') for p in c['apps']['tls']['automation']['policies'] for i in p['issuers'])
+for policy in c['apps']['tls']['automation']['policies']:
+    for issuer in policy['issuers']:
+        if issuer['module'] == 'acme':
+            assert issuer.get('challenges',{}).get('bind_host') in ('::', '0.0.0.0'), issuer
 assert 'example.com' in json.dumps(c['apps']['http'])
 print('PASS HTTP-01生产配置：只常驻本机8443、保留自动证书管理、禁用跳转/QUIC/TLS-ALPN验证')
 PY
@@ -373,7 +377,9 @@ import pathlib, sys
 p = pathlib.Path(sys.argv[1])
 s = p.read_text()
 s = s.replace('auto_https disable_redirects', f'admin 127.0.0.1:{sys.argv[4]}\n    skip_install_trust\n    storage file_system {sys.argv[2]}/storage\n    auto_https disable_redirects')
-s = s.replace('issuer acme {\n            disable_tlsalpn_challenge\n        }', 'issuer internal')
+issuer = 'cert_issuer acme {\n        disable_tlsalpn_challenge\n    }'
+assert s.count(issuer) == 1
+s = s.replace(issuer, 'cert_issuer internal')
 p.write_text(s)
 legacy = s + f'\nhttp://example.com:{sys.argv[3]} {{\n    bind 127.0.0.1\n    root * {sys.argv[2]}/www\n    file_server\n}}\n'
 (p.parent/'legacy.Caddyfile').write_text(legacy)

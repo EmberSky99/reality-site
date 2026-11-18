@@ -70,7 +70,7 @@ jobs:
       - name: Record tested scope
         if: success()
         run: |
-          printf '%s\n' 'PASS: 实际软件包安装、服务文件、Caddy配置、本地CA的TLS1.3/HTTP2/网页200。普通容器未运行systemd，未验证公网ACME或SELinux。' >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' 'PASS: 实际软件包安装、配置、本地CA的TLS1.3/HTTP2/网页200，以及本地模拟ACME服务实际访问HTTP-01挑战。普通容器未运行systemd，未验证公网CA签发或SELinux。' >> "$GITHUB_STEP_SUMMARY"
 
   systemd:
     name: systemd / ${{ matrix.runner }}

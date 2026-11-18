@@ -94,9 +94,9 @@ install -d -m 755 -o caddy -g caddy /var/lib/caddy/ci-storage
 python3 - "$WORK/production.Caddyfile" "$WORK/runtime.Caddyfile" <<'PY'
 import pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text()
-old = 'issuer acme {\n            disable_tlsalpn_challenge\n        }'
+old = 'cert_issuer acme {\n        disable_tlsalpn_challenge\n    }'
 assert text.count(old) == 1
-text = text.replace(old, 'issuer internal')
+text = text.replace(old, 'cert_issuer internal')
 text = text.replace('auto_https disable_redirects', '''skip_install_trust
     storage file_system /var/lib/caddy/ci-storage
     auto_https disable_redirects''', 1)
@@ -157,4 +157,5 @@ if [[ "$MODE" == systemd ]]; then
     systemctl is-active --quiet caddy
     printf 'PASS: actual systemd service/reload, managed rerun preserves custom page and leaf certificate\n'
 fi
+python3 "$ROOT/tests/acme-http01.test.py" "$(command -v caddy)" "$ROOT/reality-site.sh"
 printf 'PASS: %s / %s / %s\n' "$PRETTY_NAME" "$(uname -m)" "$MODE"

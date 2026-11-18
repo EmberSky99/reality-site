@@ -324,11 +324,20 @@ cleanup_deploy() {
 }
 
 write_caddyfile() {
-    local domain="$1" port="$2" email="${3:-}" root="${4:-/var/www/reality-site}"
+    local domain="$1" port="$2" email="${3:-}" root="${4:-/var/www/reality-site}" challenge_bind=0.0.0.0
+    # Caddy inherits the site's bind address for ACME unless a global default is
+    # set first. Use a public wildcard for challenges; override it below for HTTPS.
+    # Go's wildcard IPv6 TCP listener also accepts IPv4 on dual-stack Linux.
+    if [[ -r /proc/net/if_inet6 && -n $(</proc/net/if_inet6) ]]; then challenge_bind=::; fi
     printf '# Managed by reality-site.sh. Manual edits disable automatic replacement.\n{\n'
     [[ -z "$email" ]] || printf '    email %s\n' "$email"
+    printf '    default_bind %s\n' "$challenge_bind"
+    printf '    acme_ca https://acme-v02.api.letsencrypt.org/directory\n'
     printf '    auto_https disable_redirects\n'
     cat <<EOF
+    cert_issuer acme {
+        disable_tlsalpn_challenge
+    }
     default_sni $domain
     servers {
         protocols h1 h2
@@ -341,13 +350,6 @@ EOF
 # The named address enables certificate management; the catch-all serves IP/no-SNI requests.
 https://$domain:$port, https://:$port {
     bind 127.0.0.1
-EOF
-    cat <<'EOF'
-    tls {
-        issuer acme {
-            disable_tlsalpn_challenge
-        }
-    }
 EOF
     cat <<EOF
     root * $root
@@ -572,7 +574,9 @@ deploy() {
         install -m 600 "$STAGE/state" "$STATE"
     fi
     apply_site
-    verify_site
+    # A verification timeout already explains what remains unresolved. Preserve
+    # its exit code without the generic ERR trap claiming installation failed.
+    verify_site || exit "$?"
 }
 
 main() {
