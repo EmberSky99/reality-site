@@ -107,8 +107,10 @@ ss -lntp 'sport = :80'
 
 [查看每个系统的真实测试日志](https://github.com/tinkerlab-tech/reality-site/actions/workflows/compatibility.yml)。修改脚本或测试后自动运行，也可在Actions中选择Linux compatibility → Run workflow手动运行。
 
+**2026年11月18日：[完整一轮45/45通过](https://github.com/tinkerlab-tech/reality-site/actions/runs/44261853434)，对应提交`6e521d1`。** 真实安装测试发现并修复了精简RPM镜像中`curl-minimal`与完整`curl`的冲突：已有curl时直接复用，缺少时才安装。后续以新提交的测试结果为准。
+
 - **42个安装任务**：21种系统版本 × x86_64/ARM64，使用对应发行版容器和原生架构运行器。补齐文档要求的基础工具后，调用实际安装函数安装Caddy，检查服务用户与服务文件、验证生产配置，并用本地CA测试TLS 1.3、HTTP/2和网页内容。
-- **3个systemd任务**：在Ubuntu 22.04/24.04/26.04临时虚拟机中，实际安装、启动、重载服务；验证重复运行保留自定义网页及同一证书，并运行本地回归测试。
+- **3个x86_64 systemd任务**：在Ubuntu 22.04/24.04/26.04临时虚拟机中，实际安装、启动、重载服务；验证重复运行保留自定义网页及同一证书，并运行本地回归测试。
 - 容器测试不伪造systemd运行状态；各RPM系统的完整服务启动、SELinux、公网HTTP-01及真实自动续期仍需另测。RHEL暂未加入真实镜像矩阵，不能把其衍生系统的结果算作RHEL实测。
 - Debian 11的默认镜像软件源已出现404；CI明确使用Debian官方签名归档源准备该环境，再测试安装。部署脚本不自动改源，因此这项结果只适用于软件源已经可用的Debian 11。
 - 所有证书测试使用本地CA，不使用用户域名、账号、VPS或正式证书额度。具体通过/失败以对应提交的Actions结果为准，流程文件存在不代表测试已通过。
@@ -121,10 +123,10 @@ ss -lntp 'sport = :80'
 bash tests/reality-site.test.sh /path/to/caddy /path/to/shellcheck
 ```
 
-测试使用临时目录、本地CA和模拟systemd操作，不连接VPS、不申请公网证书。安装中断、各发行版完整安装、SELinux及真实证书自动续期仍需实机验证。
+上述本地回归使用临时目录、本地CA和模拟systemd操作；Actions中的3个systemd任务另行验证真实服务操作。安装中断恢复、RPM系统的完整服务部署、SELinux及公网证书申请/续期仍需进一步验证。
 
 本地已通过 Bash/ShellCheck、系统版本分类、端口冲突、预装 Caddy 退出、重复运行、配置失败恢复，以及真实 Caddy 的 TLS 1.3、HTTP/2 和网页 200。使用本地 CA 的升级测试已验证 HTTP 端口释放及原证书复用。新增系统还覆盖 DNF4/DNF5 插件、EL/Fedora及架构的软件源选择、依赖失败停止；这些安装分支使用模拟包管理器测试。2026年11月18日已读取验证DEB的amd64/arm64包索引，以及EL 8/9/10、Fedora 43/44/45两种架构的全部12份RPM仓库元数据；这只确认对应软件源可用，不代替各系统的依赖解析和完整安装。
 
-旧版曾在 Debian 13/amd64 完成真实安装、HTTP-01 正式签发和本机 HTTPS 验证。当前精简版已有用户初步测试正常的反馈；后续自动续期、各发行版的完整安装及SELinux仍待进一步实机验证。
+旧版曾在 Debian 13/amd64 完成真实安装、HTTP-01 正式签发和本机 HTTPS 验证。当前版的自动化测试范围和结果见上面的Actions记录；公网自动续期及RPM系统的systemd/SELinux仍未覆盖。
 
 参考：[Caddy 自动 HTTPS](https://caddyserver.com/docs/automatic-https)、[关闭自动跳转](https://caddyserver.com/docs/caddyfile/options#auto-https)。
