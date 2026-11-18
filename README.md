@@ -22,6 +22,28 @@ curl -fL https://raw.githubusercontent.com/tinkerlab-tech/reality-site/main/real
 
 只有本机 HTTPS 验证成功时，公网 443 的 REALITY 回落和代理出站仍需分别验证。
 
+## 自定义网页
+
+部署成功后，通过SSH工具的SFTP文件管理器，将自制网页上传到VPS的 **`/var/www/reality-site/`**。首页文件名为 **`index.html`**，可以直接拖拽替换。
+
+可先下载[可编辑网页模板](site/index.html)，在电脑上修改标题、简介和文章内容、预览效果，再上传；也可以换成自己的个人博客、摄影作品或项目介绍等静态网页。
+
+```text
+/var/www/reality-site/
+├── index.html
+├── about.html
+├── css/style.css
+└── images/photo.jpg
+```
+
+- 先部署再上传；把网站文件夹里的内容放进上述目录，让`index.html`直接位于目录下。
+- 支持HTML、CSS、JavaScript和图片，保持资源的相对路径。前端项目上传构建后的静态文件。
+- 保存上传后刷新浏览器即可，无须重跑脚本、重新签证书或重启Caddy；有缓存时强制刷新。
+- 更新部署脚本会保留已有网页；只有首页缺失时才生成默认页。
+- PHP、WordPress和后端接口需要另行部署；此处是静态网站目录。出现403时检查文件可读、目录可进入，常用权限分别为644、755。
+
+`site/index.html`是当前内置默认页的可编辑版本，自定义完成后上传到网页目录即可。默认部署仍只需下载脚本一个文件。
+
 ## 端口与证书
 
 | 端口 | 用途 |
@@ -67,6 +89,6 @@ ss -lntp 'sport = :80'
 
 本地已通过 Bash/ShellCheck、系统版本分类、端口冲突、预装 Caddy 退出、重复运行、配置失败恢复，以及真实 Caddy 的 TLS 1.3、HTTP/2 和网页 200。使用本地 CA 的升级测试已验证 HTTP 端口释放及原证书复用。
 
-旧版曾在 Debian 13/amd64 完成真实安装、HTTP-01 正式签发和本机 HTTPS 验证。本精简版的真实 VPS 升级与后续自动续期待进一步验证；各发行版的完整安装与 SELinux 尚未逐一实机验证。
+旧版曾在 Debian 13/amd64 完成真实安装、HTTP-01 正式签发和本机 HTTPS 验证。当前精简版已有用户初步测试正常的反馈；后续自动续期、各发行版的完整安装及SELinux仍待进一步实机验证。
 
 参考：[Caddy 自动 HTTPS](https://caddyserver.com/docs/automatic-https)、[关闭自动跳转](https://caddyserver.com/docs/caddyfile/options#auto-https)。
