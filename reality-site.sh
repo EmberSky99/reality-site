@@ -2,8 +2,9 @@
 # 中文交互式 REALITY 本机网站部署器。上传后运行：sudo bash reality-site.sh
 # 本文件使用 UTF-8 / LF。直接进入部署，必要检查自动执行；异常时说明原因。
 # HTTP-01 仅在验证期间临时使用80；网站不提供常驻HTTP入口或自动跳转。
-# 接受的适配目标：Ubuntu 22.04/24.04/26.04，Debian 12/13，CentOS Stream 9/10，
-# AlmaLinux/Rocky/RHEL 8/9/10；架构 x86_64 或 aarch64。安装分支不等于实机验证通过。
+# 接受的适配目标：Ubuntu 20.04/22.04/24.04/26.04，Debian 11/12/13，CentOS Stream 9/10，
+# AlmaLinux/Rocky/RHEL/Oracle Linux 8/9/10，Fedora 43/44/45；x86_64 或 aarch64。
+# 安装分支不等于实机验证通过；按系统识别，不按 VPS 商家识别。
 set -Eeuo pipefail
 set +x
 export LC_ALL=C
@@ -40,21 +41,36 @@ platform_family() {
     local os_id="$1" version="$2" name="${3:-}" major="${2%%.*}"
     case "$os_id" in
         ubuntu)
-            case "$version" in 22.04|24.04|26.04) printf apt; return 0 ;; esac ;;
+            case "$version" in 20.04|22.04|24.04|26.04) printf apt; return 0 ;; esac ;;
         debian)
-            case "$version" in 12|13) printf apt; return 0 ;; esac ;;
+            case "$version" in 11|12|13) printf apt; return 0 ;; esac ;;
         centos)
             if [[ "$name" == *Stream* && ( "$major" == 9 || "$major" == 10 ) ]]; then
                 printf dnf; return 0
             fi ;;
-        rhel|almalinux|rocky)
+        rhel|almalinux|rocky|ol)
             case "$major" in 8|9|10) printf dnf; return 0 ;; esac ;;
+        fedora)
+            case "$version" in 43|44|45) printf dnf; return 0 ;; esac ;;
     esac
-    printf '本脚本未适配 %s %s。接受 Ubuntu 22.04/24.04/26.04、Debian 12/13、CentOS Stream 9/10、Alma/Rocky/RHEL 8/9/10；旧版 CentOS Linux 不在范围内。' "$os_id" "$version"
+    printf '本脚本未适配 %s %s。接受 Ubuntu 20.04/22.04/24.04/26.04、Debian 11/12/13、CentOS Stream 9/10、Alma/Rocky/RHEL/Oracle Linux 8/9/10、Fedora 43/44/45；旧版 CentOS Linux 不在范围内。' "$os_id" "$version"
     return 1
 }
 
 supported_arch() { [[ "$1" == x86_64 || "$1" == aarch64 ]]; }
+
+# DNF5 uses a different COPR plugin package. Prefer its explicit executable so
+# minimal/newer images do not accidentally install only the DNF4 plugin.
+dnf_command() { if has dnf5; then printf dnf5; else printf dnf; fi; }
+
+caddy_copr_target() {
+    local os_id="$1" major="${2%%.*}" architecture="$3"
+    case "$os_id" in
+        fedora) printf 'fedora-%s-%s' "$major" "$architecture" ;;
+        centos|rhel|almalinux|rocky|ol) printf 'epel-%s-%s' "$major" "$architecture" ;;
+        *) return 1 ;;
+    esac
+}
 
 load_system_info() {
     [[ -r /etc/os-release ]] || die '版本不兼容：无法读取 /etc/os-release，不能识别系统版本。'
@@ -145,7 +161,7 @@ check_platform() {
     [[ $EUID -eq 0 ]] || die '部署请使用 root，或运行 sudo bash reality-site.sh。'
     [[ -d /run/systemd/system ]] || die '当前不是运行中的 systemd 系统。'
     local package_manager
-    if [[ $FAMILY == apt ]]; then package_manager=apt-get; else package_manager=dnf; fi
+    if [[ $FAMILY == apt ]]; then package_manager=apt-get; else package_manager=$(dnf_command); fi
     has "$package_manager" || die "没有找到 $package_manager。"
     for tool in ss awk sha256sum flock getent runuser; do
         if ! has "$tool"; then
@@ -250,6 +266,7 @@ ask_settings() {
 
 install_caddy() {
     (( MANAGED )) && return 0
+    local package_manager copr_plugin copr_target
     say '安装官方 Caddy 软件包……'
     # Debian packages start the default :80 site automatically. Mask only this new
     # Caddy unit until our final configuration is ready.
@@ -269,9 +286,14 @@ install_caddy() {
         apt-get update
         DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
     else
-        dnf install -y ca-certificates curl dnf-plugins-core
-        dnf copr enable -y @caddy/caddy
-        dnf install -y caddy
+        package_manager=$(dnf_command)
+        if [[ "$package_manager" == dnf5 ]]; then copr_plugin=dnf5-plugins; else copr_plugin=dnf-plugins-core; fi
+        copr_target=$(caddy_copr_target "$ID" "$VERSION_ID" "$(uname -m)")
+        "$package_manager" install -y ca-certificates curl "$copr_plugin" || die '安装 Caddy 的基础依赖失败，请检查本系统软件源。'
+        # Specify the EL/Fedora build explicitly: derivatives such as Oracle Linux
+        # need not be recognized by COPR's automatic distribution detection.
+        "$package_manager" copr enable -y @caddy/caddy "$copr_target" || die "无法启用 Caddy 软件源：$copr_target。"
+        "$package_manager" install -y caddy || die "安装 Caddy 失败，请检查 $copr_target 软件源和上面的依赖错误。"
     fi
 }
 

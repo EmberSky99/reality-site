@@ -19,16 +19,24 @@ bash -n "$ROOT/reality-site.sh"
 source "$ROOT/reality-site.sh"
 
 # Test platform selection without emulating an installed RPM/DEB system.
-for entry in 'ubuntu|22.04|Ubuntu 22.04 LTS|apt' 'ubuntu|24.04|Ubuntu 24.04 LTS|apt' 'ubuntu|26.04|Ubuntu 26.04 LTS|apt' \
-    'debian|12|Debian GNU/Linux 12|apt' 'debian|13|Debian GNU/Linux 13|apt' \
+for entry in 'ubuntu|20.04|Ubuntu 20.04 LTS|apt' 'ubuntu|22.04|Ubuntu 22.04 LTS|apt' 'ubuntu|24.04|Ubuntu 24.04 LTS|apt' 'ubuntu|26.04|Ubuntu 26.04 LTS|apt' \
+    'debian|11|Debian GNU/Linux 11|apt' 'debian|12|Debian GNU/Linux 12|apt' 'debian|13|Debian GNU/Linux 13|apt' \
     'centos|9|CentOS Stream 9|dnf' 'centos|10|CentOS Stream 10|dnf' \
-    'rocky|8.10|Rocky Linux 8.10|dnf' 'almalinux|8.10|AlmaLinux 8.10|dnf' 'rhel|8.10|RHEL 8.10|dnf' \
-    'rocky|9.6|Rocky Linux 9.6|dnf' 'almalinux|10.0|AlmaLinux 10|dnf' 'rhel|9.5|RHEL 9.5|dnf'; do
+    'fedora|43|Fedora Linux 43|dnf' 'fedora|44|Fedora Linux 44|dnf' 'fedora|45|Fedora Linux 45|dnf'; do
     IFS='|' read -r os_id os_version os_name expected <<< "$entry"
     [[ $(platform_family "$os_id" "$os_version" "$os_name") == "$expected" ]]
 done
+for os_id in rocky almalinux rhel ol; do
+    for os_version in 8.10 9.6 10.0; do
+        [[ $(platform_family "$os_id" "$os_version" "$os_id $os_version") == dnf ]]
+    done
+done
 for entry in 'centos|7|CentOS Linux 7' 'centos|8|CentOS Linux 8' \
-    'centos|8|CentOS Stream 8' 'ubuntu|18.04|Ubuntu 18.04' 'alpine|3.22|Alpine Linux'; do
+    'centos|8|CentOS Stream 8' 'centos|9|CentOS Linux 9' \
+    'ubuntu|18.04|Ubuntu 18.04' 'ubuntu|28.04|Ubuntu 28.04' \
+    'debian|10|Debian 10' 'debian|14|Debian 14' 'ol|7.9|Oracle Linux 7.9' \
+    'fedora|42|Fedora Linux 42' 'fedora|rawhide|Fedora Rawhide' 'fedora|46|Fedora Linux 46' \
+    'alpine|3.22|Alpine Linux' 'arch||Arch Linux' 'opensuse-leap|16.0|openSUSE Leap 16'; do
     IFS='|' read -r os_id os_version os_name <<< "$entry"
     if platform_family "$os_id" "$os_version" "$os_name" >/dev/null; then
         printf '错误：接受了未适配系统 %s %s\n' "$os_id" "$os_version"; exit 1
@@ -38,6 +46,66 @@ supported_arch x86_64
 supported_arch aarch64
 if supported_arch i686 || supported_arch riscv64; then printf '错误：接受了未适配架构\n'; exit 1; fi
 printf 'PASS 发行版/版本及架构分支（不代表各系统完整安装已验证）\n'
+
+# Exercise the RPM installation path without running a package manager. The
+# simulated backend rejects a DNF4/DNF5 plugin mismatch and wrong COPR build.
+# Mock functions are called indirectly through the sourced installer's commands.
+# shellcheck disable=SC2329
+for entry in 'fedora|43|dnf|x86_64|fedora-43-x86_64' \
+    'fedora|45|dnf5|aarch64|fedora-45-aarch64' \
+    'ol|8.10|dnf|aarch64|epel-8-aarch64' 'ol|9.6|dnf|x86_64|epel-9-x86_64' \
+    'rocky|10.0|dnf5|x86_64|epel-10-x86_64' 'centos|10|dnf|aarch64|epel-10-aarch64'; do
+    (
+        IFS='|' read -r ID VERSION_ID EXPECTED_DNF TEST_ARCH EXPECTED_TARGET <<< "$entry"
+        FAMILY=dnf
+        MANAGED=0
+        ACTIONS="$WORK/rpm-actions"
+        : > "$ACTIONS"
+        has() { [[ "$1" == dnf5 && "$EXPECTED_DNF" == dnf5 ]]; }
+        uname() { printf '%s\n' "$TEST_ARCH"; }
+        systemctl() { [[ "$*" == 'mask caddy.service' ]]; }
+        simulate_dnf() {
+            local actual_command="$1"
+            shift
+            [[ "$actual_command" == "$EXPECTED_DNF" ]] || return 1
+            case "${1:-}" in
+                install)
+                    if [[ ${*: -1} == caddy ]]; then
+                        [[ $(cat "$ACTIONS") == $'dependencies\nrepository' ]] || return 1
+                        printf 'caddy\n' >> "$ACTIONS"
+                    else
+                        if [[ "$EXPECTED_DNF" == dnf5 ]]; then
+                            [[ ${*: -1} == dnf5-plugins ]] || return 1
+                        else
+                            [[ ${*: -1} == dnf-plugins-core ]] || return 1
+                        fi
+                        printf 'dependencies\n' >> "$ACTIONS"
+                    fi ;;
+                copr)
+                    [[ $(cat "$ACTIONS") == dependencies && ${*: -1} == "$EXPECTED_TARGET" ]] || return 1
+                    printf 'repository\n' >> "$ACTIONS" ;;
+                *) return 1 ;;
+            esac
+        }
+        dnf() { simulate_dnf dnf "$@"; }
+        dnf5() { simulate_dnf dnf5 "$@"; }
+        install_caddy >/dev/null
+        [[ $(cat "$ACTIONS") == $'dependencies\nrepository\ncaddy' ]]
+    )
+done
+# shellcheck disable=SC2329
+(
+    FAMILY=dnf ID=ol VERSION_ID=9 MANAGED=0
+    has() { return 1; }
+    systemctl() { :; }
+    dnf() {
+        printf '%s\n' "$*" >> "$WORK/failed-rpm-actions"
+        return 1
+    }
+    if output=$(install_caddy 2>&1); then printf '错误：依赖安装失败后仍继续部署\n'; exit 1; fi
+    [[ "$output" == *基础依赖失败* && $(wc -l < "$WORK/failed-rpm-actions") == 1 ]]
+)
+printf 'PASS RPM安装分支：DNF4/5插件匹配、EL/Fedora及架构选择、依赖失败立即停止（模拟）\n'
 
 (
     load_system_info() { ID=centos; VERSION_ID=7; PRETTY_NAME='CentOS Linux 7'; }

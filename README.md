@@ -67,7 +67,21 @@ curl -fL https://raw.githubusercontent.com/tinkerlab-tech/reality-site/main/real
 
 ## 系统适配
 
-Ubuntu 22.04/24.04/26.04、Debian 12/13、CentOS Stream 9/10、AlmaLinux/Rocky/RHEL 8/9/10；架构 x86_64 或 aarch64。要求 systemd、root，未适配系统直接退出。
+按 VPS 实际安装的系统识别，不限制搬瓦工、DMIT、VMISS 等商家。
+
+| 系统 | 脚本接受的版本 |
+| --- | --- |
+| Ubuntu | 20.04、22.04、24.04、26.04 |
+| Debian | 11、12、13 |
+| CentOS Stream | 9、10 |
+| AlmaLinux、Rocky Linux、RHEL、Oracle Linux | 8、9、10，包括对应小版本 |
+| Fedora | 43、44、45 |
+
+架构为 x86_64 或 aarch64，要求 systemd、root，以及可用的系统软件源。自动区分 DNF4/DNF5 的 COPR 插件，并为 RPM 系统指定对应的 EL/Fedora 与 CPU 架构软件源。依赖安装或软件源启用失败即停止，不跨版本混用软件包。
+
+CentOS Linux 7/8、CentOS Stream 8、Debian 10、Alpine/OpenRC、Arch 和 openSUSE 尚未适配；未知版本直接说明原因并退出。精简镜像缺少必要基础工具时会列出对应工具包，不会自动重装系统或切换到归档源。
+
+这些是已实现安装分支的兼容目标，**不代表每个系统都已完成实机安装**。选型参考[搬瓦工镜像公告](https://bandwagonhost.com/news)、[DMIT公开系统列表](https://www.dmit.io/pages/cloud-instance?language=english)；VMISS的完整镜像版本列表未能从公开页面确认。安装方式依据[Caddy官方说明](https://caddyserver.com/docs/install)及[Caddy COPR构建目录](https://download.copr.fedorainfracloud.org/results/@caddy/caddy/)，商家后台可选版本仍以实际面板为准。
 
 ## 排查
 
@@ -97,7 +111,7 @@ bash tests/reality-site.test.sh /path/to/caddy /path/to/shellcheck
 
 测试使用临时目录、本地CA和模拟systemd操作，不连接VPS、不申请公网证书。安装中断、各发行版完整安装、SELinux及真实证书自动续期仍需实机验证。
 
-本地已通过 Bash/ShellCheck、系统版本分类、端口冲突、预装 Caddy 退出、重复运行、配置失败恢复，以及真实 Caddy 的 TLS 1.3、HTTP/2 和网页 200。使用本地 CA 的升级测试已验证 HTTP 端口释放及原证书复用。
+本地已通过 Bash/ShellCheck、系统版本分类、端口冲突、预装 Caddy 退出、重复运行、配置失败恢复，以及真实 Caddy 的 TLS 1.3、HTTP/2 和网页 200。使用本地 CA 的升级测试已验证 HTTP 端口释放及原证书复用。新增系统还覆盖 DNF4/DNF5 插件、EL/Fedora及架构的软件源选择、依赖失败停止；这些安装分支使用模拟包管理器测试。2026年11月18日已读取验证DEB的amd64/arm64包索引，以及EL 8/9/10、Fedora 43/44/45两种架构的全部12份RPM仓库元数据；这只确认对应软件源可用，不代替各系统的依赖解析和完整安装。
 
 旧版曾在 Debian 13/amd64 完成真实安装、HTTP-01 正式签发和本机 HTTPS 验证。当前精简版已有用户初步测试正常的反馈；后续自动续期、各发行版的完整安装及SELinux仍待进一步实机验证。
 
