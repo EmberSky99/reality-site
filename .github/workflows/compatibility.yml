@@ -1,0 +1,96 @@
+name: Linux compatibility
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - reality-site.sh
+      - tests/**
+      - .github/workflows/compatibility.yml
+  pull_request:
+    paths:
+      - reality-site.sh
+      - tests/**
+      - .github/workflows/compatibility.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compatibility-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  packages:
+    name: ${{ matrix.distro.name }} / ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        distro:
+          - {name: Ubuntu 20.04, image: 'ubuntu:20.04', id: ubuntu, version: '20.04'}
+          - {name: Ubuntu 22.04, image: 'ubuntu:22.04', id: ubuntu, version: '22.04'}
+          - {name: Ubuntu 24.04, image: 'ubuntu:24.04', id: ubuntu, version: '24.04'}
+          - {name: Ubuntu 26.04, image: 'ubuntu:26.04', id: ubuntu, version: '26.04'}
+          - {name: Debian 11, image: 'debian:11', id: debian, version: '11'}
+          - {name: Debian 12, image: 'debian:12', id: debian, version: '12'}
+          - {name: Debian 13, image: 'debian:13', id: debian, version: '13'}
+          - {name: CentOS Stream 9, image: 'quay.io/centos/centos:stream9', id: centos, version: '9'}
+          - {name: CentOS Stream 10, image: 'quay.io/centos/centos:stream10', id: centos, version: '10'}
+          - {name: AlmaLinux 8, image: 'almalinux:8', id: almalinux, version: '8'}
+          - {name: AlmaLinux 9, image: 'almalinux:9', id: almalinux, version: '9'}
+          - {name: AlmaLinux 10, image: 'almalinux:10', id: almalinux, version: '10'}
+          - {name: Rocky Linux 8, image: 'rockylinux:8', id: rocky, version: '8'}
+          - {name: Rocky Linux 9, image: 'rockylinux:9', id: rocky, version: '9'}
+          - {name: Rocky Linux 10, image: 'rockylinux:10', id: rocky, version: '10'}
+          - {name: Oracle Linux 8, image: 'oraclelinux:8', id: ol, version: '8'}
+          - {name: Oracle Linux 9, image: 'oraclelinux:9', id: ol, version: '9'}
+          - {name: Oracle Linux 10, image: 'oraclelinux:10', id: ol, version: '10'}
+          - {name: Fedora 43, image: 'fedora:43', id: fedora, version: '43'}
+          - {name: Fedora 44, image: 'fedora:44', id: fedora, version: '44'}
+          - {name: Fedora 45, image: 'fedora:45', id: fedora, version: '45'}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install real packages and test local HTTPS
+        env:
+          IMAGE: ${{ matrix.distro.image }}
+          EXPECTED_ID: ${{ matrix.distro.id }}
+          EXPECTED_VERSION: ${{ matrix.distro.version }}
+        run: |
+          docker run --rm \
+            --env EXPECTED_ID --env EXPECTED_VERSION \
+            --volume "$GITHUB_WORKSPACE:/work:ro" \
+            "$IMAGE" bash /work/tests/ci-install.test.sh container
+      - name: Record tested scope
+        if: success()
+        run: |
+          printf '%s\n' 'PASS: 实际软件包安装、服务文件、Caddy配置、本地CA的TLS1.3/HTTP2/网页200。普通容器未运行systemd，未验证公网ACME或SELinux。' >> "$GITHUB_STEP_SUMMARY"
+
+  systemd:
+    name: systemd / ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Test actual service start and reload
+        run: sudo bash tests/ci-install.test.sh systemd
+      - name: Install regression test tools
+        run: sudo apt-get install -y shellcheck python3 openssl
+      - name: Run existing regression tests
+        run: bash tests/reality-site.test.sh /usr/bin/caddy "$(command -v shellcheck)"
+      - name: Record tested scope
+        if: success()
+        run: |
+          printf '%s\n' 'PASS: 真实systemd启动、重载、重复运行保留网页和证书、本地HTTPS，以及原有回归测试。未申请公网证书。' >> "$GITHUB_STEP_SUMMARY"
