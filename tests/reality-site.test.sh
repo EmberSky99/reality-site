@@ -54,14 +54,15 @@ printf 'PASS 发行版/版本及架构分支（不代表各系统完整安装已
 for entry in 'fedora|43|dnf|x86_64|fedora-43-x86_64' \
     'fedora|45|dnf5|aarch64|fedora-45-aarch64' \
     'ol|8.10|dnf|aarch64|epel-8-aarch64' 'ol|9.6|dnf|x86_64|epel-9-x86_64' \
-    'rocky|10.0|dnf5|x86_64|epel-10-x86_64' 'centos|10|dnf|aarch64|epel-10-aarch64'; do
+    'rocky|10.0|dnf5|x86_64|epel-10-x86_64' 'centos|10|dnf|aarch64|epel-10-aarch64' \
+    'centos|9|dnf|x86_64|epel-9-x86_64|existing-curl'; do
     (
-        IFS='|' read -r ID VERSION_ID EXPECTED_DNF TEST_ARCH EXPECTED_TARGET <<< "$entry"
+        IFS='|' read -r ID VERSION_ID EXPECTED_DNF TEST_ARCH EXPECTED_TARGET TEST_CURL <<< "$entry"
         FAMILY=dnf
         MANAGED=0
         ACTIONS="$WORK/rpm-actions"
         : > "$ACTIONS"
-        has() { [[ "$1" == dnf5 && "$EXPECTED_DNF" == dnf5 ]]; }
+        has() { [[ ( "$1" == dnf5 && "$EXPECTED_DNF" == dnf5 ) || ( "$1" == curl && "$TEST_CURL" == existing-curl ) ]]; }
         uname() { printf '%s\n' "$TEST_ARCH"; }
         systemctl() { [[ "$*" == 'mask caddy.service' ]]; }
         simulate_dnf() {
@@ -74,6 +75,12 @@ for entry in 'fedora|43|dnf|x86_64|fedora-43-x86_64' \
                         [[ $(cat "$ACTIONS") == $'dependencies\nrepository' ]] || return 1
                         printf 'caddy\n' >> "$ACTIONS"
                     else
+                        if [[ "$TEST_CURL" == existing-curl ]]; then
+                            # Reproduce curl-minimal/full-curl package conflicts.
+                            [[ " $* " != *' curl '* ]] || return 1
+                        else
+                            [[ " $* " == *' curl '* ]] || return 1
+                        fi
                         if [[ "$EXPECTED_DNF" == dnf5 ]]; then
                             [[ ${*: -1} == dnf5-plugins ]] || return 1
                         else

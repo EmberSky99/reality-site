@@ -267,6 +267,7 @@ ask_settings() {
 install_caddy() {
     (( MANAGED )) && return 0
     local package_manager copr_plugin copr_target
+    local -a dependencies
     say '安装官方 Caddy 软件包……'
     # Debian packages start the default :80 site automatically. Mask only this new
     # Caddy unit until our final configuration is ready.
@@ -289,7 +290,12 @@ install_caddy() {
         package_manager=$(dnf_command)
         if [[ "$package_manager" == dnf5 ]]; then copr_plugin=dnf5-plugins; else copr_plugin=dnf-plugins-core; fi
         copr_target=$(caddy_copr_target "$ID" "$VERSION_ID" "$(uname -m)")
-        "$package_manager" install -y ca-certificates curl "$copr_plugin" || die '安装 Caddy 的基础依赖失败，请检查本系统软件源。'
+        dependencies=(ca-certificates)
+        # Minimal EL images may already provide curl through curl-minimal, which
+        # conflicts with the full curl package. Keep the working executable.
+        if ! has curl; then dependencies+=(curl); fi
+        dependencies+=("$copr_plugin")
+        "$package_manager" install -y "${dependencies[@]}" || die '安装 Caddy 的基础依赖失败，请检查本系统软件源。'
         # Specify the EL/Fedora build explicitly: derivatives such as Oracle Linux
         # need not be recognized by COPR's automatic distribution detection.
         "$package_manager" copr enable -y @caddy/caddy "$copr_target" || die "无法启用 Caddy 软件源：$copr_target。"
