@@ -111,6 +111,8 @@ ss -lntp 'sport = :80'
 
 该轮使用本地CA，未覆盖真实HTTP-01监听。后续首次签发实测暴露：站点的`bind 127.0.0.1`被Caddy继承为ACME挑战监听地址，公网80因而拒绝连接。已通过全局ACME签发器、CA和默认绑定设置分离验证监听与网站监听；网站仍只绑定本机，挑战使用公网通配地址。新增本地ACME测试实际访问非回环IPv4及可用的IPv6挑战地址，旧版可复现失败、修复版本地通过；该测试已接入每个安装任务。验证超时也不再追加误导性的“安装失败行号”。
 
+**补齐HTTP-01检查后：[45/45组合均通过](https://github.com/tinkerlab-tech/reality-site/actions/runs/44278120303)，对应提交`8cf9d7b`。** Ubuntu 24.04的一次任务停在系统镜像下载阶段，单项重跑后通过；其余结果保留。挑战测试使用临时高端口及本地模拟ACME服务，不申请公网证书；用户随后在Debian 13实际完成公网CA签发及本机HTTPS验证。
+
 - **42个安装任务**：21种系统版本 × x86_64/ARM64，使用对应发行版容器和原生架构运行器。补齐文档要求的基础工具后，调用实际安装函数安装Caddy，检查服务用户与服务文件、验证生产配置；用本地CA测试TLS 1.3、HTTP/2和网页内容，并让本地模拟ACME服务实际访问HTTP-01挑战。
 - **3个x86_64 systemd任务**：在Ubuntu 22.04/24.04/26.04临时虚拟机中，实际安装、启动、重载服务；验证重复运行保留自定义网页及同一证书，并运行本地回归测试。
 - 容器测试不伪造systemd运行状态；各RPM系统的完整服务启动、SELinux、公网HTTP-01及真实自动续期仍需另测。RHEL暂未加入真实镜像矩阵，不能把其衍生系统的结果算作RHEL实测。
@@ -129,6 +131,6 @@ bash tests/reality-site.test.sh /path/to/caddy /path/to/shellcheck
 
 本地已通过 Bash/ShellCheck、系统版本分类、端口冲突、预装 Caddy 退出、重复运行、配置失败恢复，以及真实 Caddy 的 TLS 1.3、HTTP/2 和网页 200。使用本地 CA 的升级测试已验证 HTTP 端口释放及原证书复用。新增系统还覆盖 DNF4/DNF5 插件、EL/Fedora及架构的软件源选择、依赖失败停止；这些安装分支使用模拟包管理器测试。2026年11月18日已读取验证DEB的amd64/arm64包索引，以及EL 8/9/10、Fedora 43/44/45两种架构的全部12份RPM仓库元数据；这只确认对应软件源可用，不代替各系统的依赖解析和完整安装。
 
-旧版曾在 Debian 13/amd64 完成真实安装、HTTP-01 正式签发和本机 HTTPS 验证。当前版的自动化测试范围和结果见上面的Actions记录；公网自动续期及RPM系统的systemd/SELinux仍未覆盖。
+旧版曾在 Debian 13/amd64 完成真实安装、HTTP-01 正式签发和本机 HTTPS 验证。2026年11月18日HTTP-01绑定修复后，用户在重装的Debian 13/amd64回传：本机证书受信任、域名匹配、网页200、HTTP/2成功。当前版的自动化测试范围和结果见上面的Actions记录；公网自动续期及RPM系统的systemd/SELinux仍未覆盖。
 
 参考：[Caddy 自动 HTTPS](https://caddyserver.com/docs/automatic-https)、[关闭自动跳转](https://caddyserver.com/docs/caddyfile/options#auto-https)。
