@@ -14,15 +14,18 @@ STATE=/etc/caddy/reality-site.state
 WEBROOT=/var/www/reality-site
 BACKUP_ROOT=/var/backups/reality-site
 DOMAIN=''
+SITE_DOMAINS=()
 LOCAL_PORT=8443
 EMAIL=''
 MANAGED=0
 BACKUP=''
 STAGE=''
 VALIDATION=''
+STATE_UPDATE=''
 CADDY_INSTALL_MASKED=0
 CADDY_INSTALLED_NEW=0
 CADDY_CONFIG_APPLIED=0
+DOMAIN_CHANGE_PHASE=''
 LOCK_FILE=/run/lock/reality-site.lock
 
 say() { printf '\n%s\n' "$*"; }
@@ -33,7 +36,11 @@ state_value() { awk -F= -v key="$1" '$1 == key {print substr($0, index($0, "=") 
 write_state() {
     printf 'domain=%s\nlocal_port=%s\nemail=%s\ncert_mode=http\nstatus=%s\nconfig_sha256=%s\n' \
         "$DOMAIN" "$LOCAL_PORT" "$EMAIL" "${1:-active}" \
-        "$(sha256sum "$CONFIG" | awk '{print $1}')"
+        "$(sha256sum "${2:-$CONFIG}" | awk '{print $1}')"
+    if (( ${#SITE_DOMAINS[@]} > 1 )); then
+        local IFS=' '
+        printf 'site_domains=%s\n' "${SITE_DOMAINS[*]}"
+    fi
 }
 
 # Pure platform classification used by deployment and local tests.
@@ -175,7 +182,7 @@ check_platform() {
 }
 
 check_ownership() {
-    local certificate_mode
+    local certificate_mode site_domain found=0
     MANAGED=0
     [[ ! -L "$CONFIG" && ! -L "$STATE" && ! -L "$WEBROOT" ]] || die '配置或网站路径是符号链接，需要人工确认。'
     if [[ -f "$STATE" ]]; then
@@ -190,6 +197,13 @@ check_ownership() {
         [[ -z "$certificate_mode" || "$certificate_mode" == http ]] ||
             die '此精简版只支持 HTTP-01，不能自动更新其他证书验证方式的旧部署；原配置和续期任务保持原样，请先人工迁移。'
         if ! valid_domain "$DOMAIN" || ! valid_port "$LOCAL_PORT"; then die '已有部署记录内容异常。'; fi
+        read -r -a SITE_DOMAINS <<< "$(state_value site_domains)"
+        if (( ${#SITE_DOMAINS[@]} == 0 )); then SITE_DOMAINS=("$DOMAIN"); fi
+        for site_domain in "${SITE_DOMAINS[@]}"; do
+            valid_domain "$site_domain" || die '已有部署记录中的其他域名格式异常。'
+            if [[ "$site_domain" == "$DOMAIN" ]]; then found=1; fi
+        done
+        (( found )) || die '已有部署记录缺少当前域名。'
     elif has caddy || [[ -e "$CONFIG" || -e "$WEBROOT" ]] ||
          [[ $(systemctl show caddy -p LoadState --value 2>/dev/null) =~ ^(loaded|masked)$ ]]; then
         die "发现已安装的 Caddy、服务或网站文件，但没有本脚本的部署记录。为保留原站点，本次已停止；请先人工审阅 $CONFIG 并决定如何合并，仅安装过 Caddy 也不会自动覆盖。"
@@ -239,15 +253,19 @@ ask_settings() {
     EMAIL=${answer:-$EMAIL}
     [[ -z "$EMAIL" || "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]] || die '邮箱格式不正确。'
     if (( MANAGED )); then
-        [[ "$DOMAIN" == "$old_domain" && "$LOCAL_PORT" == "$old_port" && "$EMAIL" == "$old_email" ]] ||
-            die '重复运行支持检查与修复同一站点；更换域名/端口请人工迁移配置，避免意外影响现有节点。'
+        [[ "$LOCAL_PORT" == "$old_port" && "$EMAIL" == "$old_email" ]] ||
+            die '重复运行沿用原端口和证书邮箱；更改这两项请人工迁移。'
     fi
     check_available
     getent ahosts "$DOMAIN" >/dev/null || die '本机无法解析该域名。请确认 A/AAAA 记录后重试。'
     say '=== 即将执行的部署 ==='
     printf '域名：%s\n本机网站：127.0.0.1:%s\n网页目录：%s\n' "$DOMAIN" "$LOCAL_PORT" "$WEBROOT"
     if (( MANAGED )); then
-        printf '已识别本脚本部署的站点：复用现有 Caddy、域名和证书缓存，备份并更新配置后重载。\n'
+        if [[ "$DOMAIN" != "$old_domain" ]]; then
+            printf '更换域名：%s → %s。复用网页、端口和证书存储。新域名通过 HTTPS 验证后才保存配置；旧域名继续可用。\n' "$old_domain" "$DOMAIN"
+        else
+            printf '已识别本脚本部署的站点：复用现有 Caddy、域名和证书缓存，备份并更新配置后重载。\n'
+        fi
     else
         printf '安装官方 Caddy 软件包，写入网站配置，启用并启动 Caddy。\n'
     fi
@@ -312,6 +330,9 @@ unmask_install_caddy() {
 }
 
 cleanup_deploy() {
+    if [[ -n "$DOMAIN_CHANGE_PHASE" ]]; then
+        restore_domain_change
+    fi
     if (( CADDY_INSTALL_MASKED )); then
         systemctl disable caddy.service >/dev/null 2>&1 || true
         systemctl unmask caddy.service >/dev/null 2>&1 || true
@@ -320,11 +341,15 @@ cleanup_deploy() {
         systemctl disable --now caddy.service >/dev/null 2>&1 || true
     fi
     [[ -z "$VALIDATION" ]] || rm -f -- "$VALIDATION"
+    [[ -z "$STATE_UPDATE" ]] || rm -f -- "$STATE_UPDATE"
     [[ -z "$STAGE" ]] || rm -rf -- "$STAGE"
 }
 
 write_caddyfile() {
     local domain="$1" port="$2" email="${3:-}" root="${4:-/var/www/reality-site}" challenge_bind=0.0.0.0
+    local -a domains=("${@:5}")
+    local site_domain
+    if (( ${#domains[@]} == 0 )); then domains=("$domain"); fi
     # Caddy inherits the site's bind address for ACME unless a global default is
     # set first. Use a public wildcard for challenges; override it below for HTTPS.
     # Go's wildcard IPv6 TCP listener also accepts IPv4 on dual-stack Linux.
@@ -338,7 +363,7 @@ write_caddyfile() {
     cert_issuer acme {
         disable_tlsalpn_challenge
     }
-    default_sni $domain
+    default_sni ${domains[0]}
     servers {
         protocols h1 h2
     }
@@ -346,9 +371,12 @@ write_caddyfile() {
 EOF
     # No permanent HTTP server. With redirects disabled, CertMagic starts its
     # HTTP-01 solver only for a challenge and closes it after validation.
+    printf '# The named address enables certificate management; the catch-all serves IP/no-SNI requests.\n'
+    for site_domain in "${domains[@]}"; do
+        printf 'https://%s:%s, ' "$site_domain" "$port"
+    done
     cat <<EOF
-# The named address enables certificate management; the catch-all serves IP/no-SNI requests.
-https://$domain:$port, https://:$port {
+https://:$port {
     bind 127.0.0.1
 EOF
     cat <<EOF
@@ -451,31 +479,44 @@ footer {
 HTML
 }
 
-apply_site() {
-    local active=0 exec_start config_dir
+check_caddy_unit() {
+    local exec_start
     local config_arg_re='(^|[[:space:]])--config(=|[[:space:]]+)/etc/caddy/Caddyfile([[:space:];]|$)'
-    config_dir=$(dirname "$CONFIG")
     id caddy >/dev/null 2>&1 || die 'Caddy 软件包没有创建 caddy 用户。'
     # Unmask does not start the service; it makes its installed ExecStart visible.
     unmask_install_caddy
     exec_start=$(systemctl show caddy -p ExecStart --value)
     [[ "$exec_start" =~ $config_arg_re ]] || die 'caddy.service 使用了不同的配置路径，需要人工确认。'
-    install -d -m 755 "$config_dir" "$WEBROOT"
-    write_caddyfile "$DOMAIN" "$LOCAL_PORT" "$EMAIL" "$WEBROOT" > "$STAGE/Caddyfile"
+}
+
+prepare_site_config() {
+    write_caddyfile "$DOMAIN" "$LOCAL_PORT" "$EMAIL" "$WEBROOT" "${SITE_DOMAINS[@]}" > "$STAGE/Caddyfile"
     caddy fmt --overwrite "$STAGE/Caddyfile"
     # Validate under /etc/caddy, with restored labels, rather than asking a confined
     # SELinux user to read a root-created file under /tmp.
-    VALIDATION=$(mktemp "$config_dir/.reality-site-validation.XXXXXXXX")
+    VALIDATION=$(mktemp "$(dirname "$CONFIG")/.reality-site-validation.XXXXXXXX")
     install -m 644 "$STAGE/Caddyfile" "$VALIDATION"
     if has restorecon; then restorecon "$VALIDATION"; fi
     runuser -u caddy -- caddy validate --config "$VALIDATION" --adapter caddyfile
-    rm -f -- "$VALIDATION"
-    VALIDATION=''
+}
+
+backup_site() {
     install -d -m 700 "$BACKUP_ROOT"
     BACKUP=$(mktemp -d "$BACKUP_ROOT/$(date +%Y%m%d-%H%M%S)-XXXXXX")
     [[ ! -f "$CONFIG" ]] || cp -p -- "$CONFIG" "$BACKUP/Caddyfile"
     [[ ! -f "$WEBROOT/index.html" ]] || cp -p -- "$WEBROOT/index.html" "$BACKUP/index.html"
     [[ ! -f "$STATE" ]] || cp -p -- "$STATE" "$BACKUP/state"
+}
+
+apply_site() {
+    local active=0 config_dir
+    config_dir=$(dirname "$CONFIG")
+    check_caddy_unit
+    install -d -m 755 "$config_dir" "$WEBROOT"
+    prepare_site_config
+    rm -f -- "$VALIDATION"
+    VALIDATION=''
+    backup_site
     # Preserve any page the user has edited since the first install.
     if [[ ! -f "$WEBROOT/index.html" ]]; then
         write_page > "$STAGE/index.html"
@@ -503,7 +544,7 @@ apply_site() {
     systemctl enable caddy
 }
 
-verify_site() {
+wait_for_https() {
     local attempt status version
     say '配置已应用，检查本机 HTTPS；通过80端口验证时可能仍在等待证书签发，最多等待约 90 秒……'
     for ((attempt=1; attempt<=18; attempt++)); do
@@ -520,16 +561,6 @@ verify_site() {
             else
                 printf '此 curl 未编译 HTTP/2；配置已启用 h2，实际 H2 握手仍需 Xray tls 工具/客户端确认。\n'
             fi
-            printf '\n下一阶段在 3X-UI 填：\n  SNI：%s\n  Target/Dest：127.0.0.1:%s\n  Xver：0\n' "$DOMAIN" "$LOCAL_PORT"
-            printf '网页目录：%s（首页文件：index.html）\n配置备份：%s\n' "$WEBROOT" "$BACKUP"
-            printf '自定义网页：通过SSH工具的文件管理器上传HTML、CSS、JS和图片，保存后刷新浏览器即可。\n'
-            printf '只改网页无需重跑脚本；再次部署会保留已有网页内容。\n'
-            printf '\n证书由Caddy自动续期，无需另装证书工具或定时任务。\n'
-            printf 'Caddy不再常驻监听80；HTTP-01验证时临时使用，结束后释放。请保留公网80可达且验证时可用。\n'
-            printf '最终公网HTTPS地址：https://%s/\n' "$DOMAIN"
-            printf '浏览器请明确输入 https://；本网站不提供普通HTTP访问或自动跳转。\n'
-            printf '须先由Xray监听公网443并使用上面输出的SNI/Target，才能从浏览器验证此HTTPS地址。\n'
-            printf '当前只证明本机网站就绪；公网443回落与真实代理连接尚需分别验证。\n'
             return 0
         fi
         if (( attempt < 18 )); then sleep 2; fi
@@ -537,12 +568,78 @@ verify_site() {
     printf '\nCaddy 已启动，但本机 HTTPS 尚未验证成功；不能据此认为证书已签发。\n'
     printf '先检查 DNS 的全部 A/AAAA、TCP 80 的本机防火墙和云端安全组、域名的 CAA 限制。\n'
     printf '查看原因：journalctl -u caddy -n 60 --no-pager\n'
-    printf 'Caddy 会自动重试；无需反复执行安装或强制重签。\n'
     return 2
 }
 
+print_site_result() {
+    printf '\n下一阶段在 3X-UI 填：\n  SNI：%s\n  Target/Dest：127.0.0.1:%s\n  Xver：0\n' "$DOMAIN" "$LOCAL_PORT"
+    printf '网页目录：%s（首页文件：index.html）\n配置备份：%s\n' "$WEBROOT" "$BACKUP"
+    printf '自定义网页：通过SSH工具的文件管理器上传HTML、CSS、JS和图片，保存后刷新浏览器即可。\n'
+    printf '只改网页无需重跑脚本；再次部署会保留已有网页内容。\n'
+    printf '\n证书由Caddy自动续期，无需另装证书工具或定时任务。\n'
+    printf 'Caddy不再常驻监听80；HTTP-01验证时临时使用，结束后释放。请保留公网80可达且验证时可用。\n'
+    printf '最终公网HTTPS地址：https://%s/\n' "$DOMAIN"
+    printf '浏览器请明确输入 https://；本网站不提供普通HTTP访问或自动跳转。\n'
+    printf '须先由Xray监听公网443并使用上面输出的SNI/Target，才能从浏览器验证此HTTPS地址。\n'
+    printf '当前只证明本机网站就绪；公网443回落与真实代理连接尚需分别验证。\n'
+}
+
+verify_site() {
+    if wait_for_https; then
+        print_site_result
+    else
+        local result=$?
+        printf 'Caddy 会自动重试；无需反复执行安装或强制重签。\n'
+        return "$result"
+    fi
+}
+
+restore_domain_change() {
+    if [[ "$DOMAIN_CHANGE_PHASE" == saving ]]; then
+        if ! cp -p -- "$BACKUP/Caddyfile" "$CONFIG" || ! cp -p -- "$BACKUP/state" "$STATE"; then
+            printf '\n恢复部署文件失败。原文件备份：%s\n' "$BACKUP" >&2
+        fi
+    fi
+    if caddy reload --config "$BACKUP/Caddyfile" --adapter caddyfile; then
+        printf '\nCaddy 已恢复使用换域名前的配置。备份：%s\n' "$BACKUP" >&2
+    else
+        printf '\nCaddy 回退失败。请检查服务日志，原配置备份：%s\n' "$BACKUP" >&2
+    fi
+}
+
+change_site_domain() {
+    local old_domain="$1" expected_config_hash="$2" expected_state_hash="$3" previous
+    check_caddy_unit
+    systemctl is-active --quiet caddy || die '换域名需要原站点正在运行；请先用原域名重跑修复。'
+    for previous in "${SITE_DOMAINS[@]}"; do
+        if [[ "$previous" == "$DOMAIN" ]]; then break; fi
+    done
+    if [[ "$previous" != "$DOMAIN" ]]; then SITE_DOMAINS+=("$DOMAIN"); fi
+    prepare_site_config
+    backup_site
+    # Preview via Caddy's API. The service's startup file stays intact until
+    # the new name passes a trusted TLS handshake, while old names keep serving.
+    DOMAIN_CHANGE_PHASE=preview
+    caddy reload --config "$VALIDATION" --adapter caddyfile
+    wait_for_https || exit "$?"
+    STATE_UPDATE=$(mktemp "$(dirname "$STATE")/.reality-site-state.XXXXXXXX")
+    write_state active "$VALIDATION" > "$STATE_UPDATE"
+    [[ ! -L "$CONFIG" && ! -L "$STATE" &&
+       "$(sha256sum "$CONFIG" | awk '{print $1}')" == "$expected_config_hash" &&
+       "$(sha256sum "$STATE" | awk '{print $1}')" == "$expected_state_hash" ]] ||
+        die '等待证书期间部署文件发生变化，本次停止保存。'
+
+    DOMAIN_CHANGE_PHASE=saving
+    mv -fT -- "$VALIDATION" "$CONFIG"
+    if has restorecon; then restorecon "$CONFIG"; fi
+    mv -fT -- "$STATE_UPDATE" "$STATE"
+    DOMAIN_CHANGE_PHASE=''
+    printf '\n新域名 %s 已就绪，旧域名 %s 仍可用。按需在入站和客户端配置新 SNI。\n' "$DOMAIN" "$old_domain"
+    print_site_result
+}
+
 deploy() {
-    local expected_managed expected_config_hash='' expected_state_hash=''
+    local expected_managed expected_config_hash='' expected_state_hash='' old_domain requested_domain
     check_platform
     check_ownership
     expected_managed=$MANAGED
@@ -551,6 +648,7 @@ deploy() {
         expected_state_hash=$(sha256sum "$STATE" | awk '{print $1}')
     fi
     ask_settings
+    requested_domain=$DOMAIN
     exec 9>"$LOCK_FILE"
     flock -n 9 || die '另一份部署器正在运行。'
     # Prompts may take minutes. Re-check ownership after acquiring the lock, so
@@ -566,6 +664,15 @@ deploy() {
     umask 077
     STAGE=$(mktemp -d /tmp/reality-site.XXXXXXXX)
     trap cleanup_deploy EXIT
+    old_domain=$DOMAIN
+    if (( MANAGED )) && [[ "$requested_domain" != "$old_domain" ]]; then
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        DOMAIN=$requested_domain
+        change_site_domain "$old_domain" "$expected_config_hash" "$expected_state_hash"
+        return 0
+    fi
     install_caddy
     if (( ! MANAGED )); then
         # Remember our new Caddy installation so a failed first deployment can
@@ -583,7 +690,7 @@ main() {
     # Deployment checks the platform before prompts or mutations. Help is always available.
     case "${1:-}" in
         --help|-h)
-            printf '用法：bash reality-site.sh [--deploy]\n直接进入部署/修复，系统与端口检查自动执行，异常时显示原因。\n' ;;
+            printf '用法：bash reality-site.sh [--deploy]\n直接进入部署/修复，输入新域名可为已有站点换域名。异常时显示原因。\n' ;;
         --deploy|'') deploy ;;
         *) die '参数无效，运行 --help 查看用法。' ;;
     esac

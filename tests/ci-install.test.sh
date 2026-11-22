@@ -91,7 +91,7 @@ write_caddyfile "$DOMAIN" "$LOCAL_PORT" '' "$WEBROOT" > "$WORK/production.Caddyf
 install -m 644 "$WORK/production.Caddyfile" /etc/caddy/ci-production.Caddyfile
 runuser -u caddy -- caddy validate --config /etc/caddy/ci-production.Caddyfile --adapter caddyfile
 install -d -m 755 -o caddy -g caddy /var/lib/caddy/ci-storage
-python3 - "$WORK/production.Caddyfile" "$WORK/runtime.Caddyfile" <<'PY'
+cat > "$WORK/use-local-ca.py" <<'PY'
 import pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text()
 old = 'cert_issuer acme {\n        disable_tlsalpn_challenge\n    }'
@@ -102,13 +102,19 @@ text = text.replace('auto_https disable_redirects', '''skip_install_trust
     auto_https disable_redirects''', 1)
 pathlib.Path(sys.argv[2]).write_text(text)
 PY
+python3 "$WORK/use-local-ca.py" "$WORK/production.Caddyfile" "$WORK/runtime.Caddyfile"
 install -m 644 "$WORK/runtime.Caddyfile" /etc/caddy/ci-runtime.Caddyfile
 
 if [[ "$MODE" == systemd ]]; then
     # Only the CA is replaced for this test. apply_site and verify_site are the
     # actual production functions; no service operations are mocked.
     # shellcheck disable=SC2329
-    write_caddyfile() { cat "$WORK/runtime.Caddyfile"; }
+    caddy() {
+        if [[ "$1" == fmt && "$2" == --overwrite ]]; then
+            python3 "$WORK/use-local-ca.py" "$3" "$3" || return
+        fi
+        command caddy "$@"
+    }
     apply_site
     CURL_CA_BUNDLE="$CA" verify_site
 else
@@ -156,6 +162,73 @@ if [[ "$MODE" == systemd ]]; then
     [[ $(openssl x509 -in "$WORK/tls-after-reload.txt" -noout -fingerprint -sha256) == "$before" ]]
     systemctl is-active --quiet caddy
     printf 'PASS: actual systemd service/reload, managed rerun preserves custom page and leaf certificate\n'
+
+    # Exercise the public deploy entry point against a legacy state file. Only
+    # resolution of our reserved .test names is faked; Caddy and HTTPS are real.
+    old_domain=$DOMAIN
+    new_domain=changed.example.test
+    failed_domain=unverified.example.test
+    original_pid=$(systemctl show caddy -p MainPID --value)
+    # shellcheck disable=SC2329
+    getent() {
+        if [[ "$1" == ahosts && ( "$2" == "$old_domain" || "$2" == "$new_domain" || "$2" == "$failed_domain" ) ]]; then
+            printf '127.0.0.1\n'
+        else
+            command getent "$@"
+        fi
+    }
+    export CURL_CA_BUNDLE="$CA"
+    (deploy < <(printf '%s\n\nDEPLOY\n' "$new_domain"))
+    check_ownership
+    [[ "$DOMAIN" == "$new_domain" && "$LOCAL_PORT" == 18443 ]]
+    [[ $(state_value site_domains) == "$old_domain $new_domain" ]]
+    for host in "$old_domain" "$new_domain"; do
+        curl --noproxy '*' --fail --silent --show-error --max-time 5 \
+            --resolve "$host:$LOCAL_PORT:127.0.0.1" "https://$host:$LOCAL_PORT/" -o "$WORK/domain-page"
+        cmp "$WEBROOT/index.html" "$WORK/domain-page"
+    done
+    grep -q 'keep my page' "$WEBROOT/index.html"
+    timeout 15 openssl s_client -connect "127.0.0.1:$LOCAL_PORT" -servername "$old_domain" \
+        -CAfile "$CA" -verify_hostname "$old_domain" -verify_return_error \
+        </dev/null > "$WORK/tls-original-domain.txt" 2>&1
+    [[ $(openssl x509 -in "$WORK/tls-original-domain.txt" -noout -fingerprint -sha256) == "$before" ]]
+
+    (deploy < <(printf '\n\nDEPLOY\n'))
+    check_ownership
+    [[ "$DOMAIN" == "$new_domain" && $(state_value site_domains) == "$old_domain $new_domain" ]]
+    cp "$CONFIG" "$WORK/before-failed-switch.config"
+    cp "$STATE" "$WORK/before-failed-switch.state"
+    set +e
+    (
+        set -e
+        # Force the verification failure, without using public DNS or waiting
+        # 90 seconds, and make sure the old site is still served in the preview.
+        # shellcheck disable=SC2329
+        curl() {
+            if [[ "${*: -1}" == "https://$failed_domain:$LOCAL_PORT/" ]]; then
+                cmp "$CONFIG" "$WORK/before-failed-switch.config" || exit 99
+                command curl --noproxy '*' --fail --silent --show-error --max-time 5 \
+                    --resolve "$old_domain:$LOCAL_PORT:127.0.0.1" "https://$old_domain:$LOCAL_PORT/" -o /dev/null || exit 99
+                return 60
+            fi
+            command curl "$@"
+        }
+        # shellcheck disable=SC2329
+        sleep() { :; }
+        deploy < <(printf '%s\n\nDEPLOY\n' "$failed_domain")
+    )
+    result=$?
+    set -e
+    [[ "$result" == 2 ]]
+    cmp "$CONFIG" "$WORK/before-failed-switch.config"
+    cmp "$STATE" "$WORK/before-failed-switch.state"
+    [[ $(systemctl show caddy -p MainPID --value) == "$original_pid" ]]
+    for host in "$old_domain" "$new_domain"; do
+        curl --noproxy '*' --fail --silent --show-error --max-time 5 \
+            --resolve "$host:$LOCAL_PORT:127.0.0.1" "https://$host:$LOCAL_PORT/" -o "$WORK/domain-page"
+        cmp "$WEBROOT/index.html" "$WORK/domain-page"
+    done
+    printf 'PASS: domain change preserves existing site/cert/port/PID; repeat and failed verification preserve stored and active configuration\n'
 fi
 python3 "$ROOT/tests/acme-http01.test.py" "$(command -v caddy)" "$ROOT/reality-site.sh"
 printf 'PASS: %s / %s / %s\n' "$PRETTY_NAME" "$(uname -m)" "$MODE"
