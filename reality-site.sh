@@ -43,7 +43,7 @@ write_state() {
     # site must not be rewritten as a single-name site by an old copy.
     if (( ${#SITE_DOMAINS[@]} > 1 )); then certificate_mode=http-multi; fi
     printf 'domain=%s\nlocal_port=%s\nemail=%s\ncert_mode=%s\nstatus=%s\nconfig_sha256=%s\n' \
-        "$DOMAIN" "$LOCAL_PORT" "$EMAIL" "$certificate_mode" "$status" "$config_hash"
+        "$DOMAIN" "$LOCAL_PORT" "$EMAIL" "${3:-$certificate_mode}" "$status" "$config_hash"
     if (( ${#SITE_DOMAINS[@]} > 1 )); then
         local IFS=' '
         printf 'site_domains=%s\n' "${SITE_DOMAINS[*]}"
@@ -277,7 +277,7 @@ ask_settings() {
     printf '域名：%s\n本机网站：127.0.0.1:%s\n网页目录：%s\n' "$DOMAIN" "$LOCAL_PORT" "$WEBROOT"
     if (( MANAGED )); then
         if [[ "$DOMAIN" != "$old_domain" ]]; then
-            printf '更换域名：%s → %s。复用网页、端口和证书存储。新域名通过 HTTPS 验证后才保存配置；旧域名继续可用。\n' "$old_domain" "$DOMAIN"
+            printf '更换域名：%s → %s。复用原网页和端口。换成功后本站只保留新域名，仍用旧 SNI 的客户端需切换。\n' "$old_domain" "$DOMAIN"
         else
             printf '已识别本脚本部署的站点：复用现有 Caddy、域名和证书缓存，备份并更新配置后重载。\n'
         fi
@@ -510,7 +510,9 @@ prepare_site_config() {
     caddy fmt --overwrite "$STAGE/Caddyfile"
     # Validate under /etc/caddy, with restored labels, rather than asking a confined
     # SELinux user to read a root-created file under /tmp.
-    VALIDATION=$(mktemp "$(dirname "$CONFIG")/.reality-site-validation.XXXXXXXX")
+    if [[ -z "$VALIDATION" ]]; then
+        VALIDATION=$(mktemp "$(dirname "$CONFIG")/.reality-site-validation.XXXXXXXX")
+    fi
     install -m 644 "$STAGE/Caddyfile" "$VALIDATION"
     if has restorecon; then restorecon "$VALIDATION"; fi
     runuser -u caddy -- caddy validate --config "$VALIDATION" --adapter caddyfile
@@ -561,12 +563,17 @@ apply_site() {
 }
 
 wait_for_https() {
-    local attempt status version
-    say '配置已应用，检查本机 HTTPS；通过80端口验证时可能仍在等待证书签发，最多等待约 90 秒……'
-    for ((attempt=1; attempt<=18; attempt++)); do
+    local mode="${1:-issuance}" attempts=18 attempt status version
+    if [[ "$mode" == final ]]; then
+        attempts=3
+    else
+        say '配置已应用，检查本机 HTTPS；通过80端口验证时可能仍在等待证书签发，最多等待约 90 秒……'
+    fi
+    for ((attempt=1; attempt<=attempts; attempt++)); do
         if status=$(curl --noproxy '*' --silent --show-error --max-time 3 \
             --resolve "$DOMAIN:$LOCAL_PORT:127.0.0.1" -o /dev/null -w '%{http_code}' \
             "https://$DOMAIN:$LOCAL_PORT/" 2>/dev/null) && [[ "$status" == 200 ]]; then
+            if [[ "$mode" == final ]]; then return 0; fi
             say '本机 HTTPS 验证成功（仅服务器内部）：证书受信任、域名匹配、网页返回 HTTP 200。'
             if [[ $(curl --version) == *HTTP2* ]]; then
                 version=$(curl --noproxy '*' --http2 --silent --show-error --max-time 5 \
@@ -579,8 +586,12 @@ wait_for_https() {
             fi
             return 0
         fi
-        if (( attempt < 18 )); then sleep 2; fi
+        if (( attempt < attempts )); then sleep 2; fi
     done
+    if [[ "$mode" == final ]]; then
+        printf '\n新域名在最终配置下未通过 HTTPS 验证，正在回退。\n' >&2
+        return 2
+    fi
     printf '\nCaddy 已启动，但本机 HTTPS 尚未验证成功；不能据此认为证书已签发。\n'
     printf '先检查 DNS 的全部 A/AAAA、TCP 80 的本机防火墙和云端安全组、域名的 CAA 限制。\n'
     printf '查看原因：journalctl -u caddy -n 60 --no-pager\n'
@@ -645,11 +656,20 @@ change_site_domain() {
     DOMAIN_CHANGE_PHASE=preview
     caddy reload --config "$VALIDATION" --adapter caddyfile
     wait_for_https || exit "$?"
+
+    # Issue and verify while the current names still work, then switch all
+    # HTTPS traffic to a config whose only site name and default SNI are new.
+    SITE_DOMAINS=("$DOMAIN")
+    prepare_site_config
+    caddy reload --config "$VALIDATION" --adapter caddyfile
+    wait_for_https final || exit "$?"
     STATE_UPDATE=$(mktemp "$(dirname "$STATE")/.reality-site-state.XXXXXXXX")
     write_state active "$VALIDATION" > "$STATE_UPDATE"
     STATE_TRANSITION=$(mktemp "$(dirname "$STATE")/.reality-site-transition.XXXXXXXX")
     {
-        cat "$STATE_UPDATE"
+        # Keep the same transition marker for compatibility with the previous
+        # installer, which also knows how to recognize either saved config.
+        write_state active "$VALIDATION" http-multi
         printf 'previous_domain=%s\nprevious_site_domains=%s\nprevious_config_sha256=%s\n' \
             "$old_domain" "$old_names" "$expected_config_hash"
     } > "$STATE_TRANSITION"
@@ -668,7 +688,7 @@ change_site_domain() {
     sync -f -- "$CONFIG"
     mv -fT -- "$STATE_UPDATE" "$STATE"
     DOMAIN_CHANGE_PHASE=''
-    printf '\n新域名 %s 已就绪，旧域名 %s 仍可用。按需在入站和客户端配置新 SNI。\n' "$DOMAIN" "$old_domain"
+    printf '\n已换为新域名 %s，旧域名已从本站移除。入站和客户端请使用新 SNI。\n' "$DOMAIN"
     print_site_result
 }
 

@@ -181,34 +181,45 @@ if [[ "$MODE" == systemd ]]; then
     (deploy < <(printf '%s\n\nDEPLOY\n' "$new_domain"))
     check_ownership
     [[ "$DOMAIN" == "$new_domain" && "$LOCAL_PORT" == 18443 ]]
-    [[ $(state_value site_domains) == "$old_domain $new_domain" ]]
-    for host in "$old_domain" "$new_domain"; do
+    [[ ${#SITE_DOMAINS[@]} == 1 && "${SITE_DOMAINS[0]}" == "$new_domain" ]]
+    [[ $(<"$CONFIG") != *"$old_domain"* ]]
+    check_domain_page() {
+        local host="$1"
         curl --noproxy '*' --fail --silent --show-error --max-time 5 \
             --resolve "$host:$LOCAL_PORT:127.0.0.1" "https://$host:$LOCAL_PORT/" -o "$WORK/domain-page"
         cmp "$WEBROOT/index.html" "$WORK/domain-page"
-    done
+    }
+    check_domain_page "$new_domain"
+    if curl --noproxy '*' --fail --silent --max-time 5 --resolve "$old_domain:$LOCAL_PORT:127.0.0.1" \
+        "https://$old_domain:$LOCAL_PORT/" -o /dev/null; then
+        printf 'FAIL: retired domain still serves trusted HTTPS\n' >&2
+        exit 1
+    fi
     grep -q 'keep my page' "$WEBROOT/index.html"
-    timeout 15 openssl s_client -connect "127.0.0.1:$LOCAL_PORT" -servername "$old_domain" \
-        -CAfile "$CA" -verify_hostname "$old_domain" -verify_return_error \
-        </dev/null > "$WORK/tls-original-domain.txt" 2>&1
-    [[ $(openssl x509 -in "$WORK/tls-original-domain.txt" -noout -fingerprint -sha256) == "$before" ]]
+    timeout 15 openssl s_client -connect "127.0.0.1:$LOCAL_PORT" -noservername \
+        -CAfile "$CA" -verify_hostname "$new_domain" -verify_return_error \
+        </dev/null > "$WORK/tls-new-default.txt" 2>&1
+    # Retiring a name is independent of deleting its stored certificate.
+    find /var/lib/caddy/ci-storage -name "$old_domain.crt" -type f -print -quit | grep -q .
 
     (deploy < <(printf '\n\nDEPLOY\n'))
     check_ownership
-    [[ "$DOMAIN" == "$new_domain" && $(state_value site_domains) == "$old_domain $new_domain" ]]
+    [[ "$DOMAIN" == "$new_domain" && ${#SITE_DOMAINS[@]} == 1 ]]
+    [[ $(<"$CONFIG") != *"$old_domain"* ]]
     cp "$CONFIG" "$WORK/before-failed-switch.config"
     cp "$STATE" "$WORK/before-failed-switch.state"
     set +e
     (
         set -e
-        # Force the verification failure, without using public DNS or waiting
-        # 90 seconds, and make sure the old site is still served in the preview.
+        # Force a verification failure, without using public DNS or waiting
+        # 90 seconds. Record proof that the current site is still served.
         # shellcheck disable=SC2329
         curl() {
             if [[ "${*: -1}" == "https://$failed_domain:$LOCAL_PORT/" ]]; then
                 cmp "$CONFIG" "$WORK/before-failed-switch.config" || exit 99
                 command curl --noproxy '*' --fail --silent --show-error --max-time 5 \
-                    --resolve "$old_domain:$LOCAL_PORT:127.0.0.1" "https://$old_domain:$LOCAL_PORT/" -o /dev/null || exit 99
+                    --resolve "$new_domain:$LOCAL_PORT:127.0.0.1" "https://$new_domain:$LOCAL_PORT/" -o /dev/null || exit 99
+                touch "$WORK/current-domain-served-in-preview"
                 return 60
             fi
             command curl "$@"
@@ -220,15 +231,12 @@ if [[ "$MODE" == systemd ]]; then
     result=$?
     set -e
     [[ "$result" == 2 ]]
+    [[ -f "$WORK/current-domain-served-in-preview" ]]
     cmp "$CONFIG" "$WORK/before-failed-switch.config"
     cmp "$STATE" "$WORK/before-failed-switch.state"
     [[ $(systemctl show caddy -p MainPID --value) == "$original_pid" ]]
-    for host in "$old_domain" "$new_domain"; do
-        curl --noproxy '*' --fail --silent --show-error --max-time 5 \
-            --resolve "$host:$LOCAL_PORT:127.0.0.1" "https://$host:$LOCAL_PORT/" -o "$WORK/domain-page"
-        cmp "$WEBROOT/index.html" "$WORK/domain-page"
-    done
-    printf 'PASS: domain change preserves existing site/cert/port/PID; repeat and failed verification preserve stored and active configuration\n'
+    check_domain_page "$new_domain"
+    printf 'PASS: domain change replaces old HTTPS and default SNI, preserves page/port/PID and restores the site on a failed change\n'
 fi
 python3 "$ROOT/tests/acme-http01.test.py" "$(command -v caddy)" "$ROOT/reality-site.sh"
 printf 'PASS: %s / %s / %s\n' "$PRETTY_NAME" "$(uname -m)" "$MODE"

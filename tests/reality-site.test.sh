@@ -351,12 +351,12 @@ printf 'PASS 确认期间变化：手工编辑、并发新部署和部署记录�
     caddy() { :; }
     sync() { :; }
     has() { return 1; }
-    wait_for_https() { :; }
+    wait_for_https() { [[ "$interruption" != final_verification_failure || "${1:-}" != final ]] || return 2; }
     prepare_site_config() {
         VALIDATION=$(mktemp "$base/next-config.XXXXXXXX")
         write_caddyfile "$DOMAIN" "$LOCAL_PORT" "$EMAIL" "$WEBROOT" "${SITE_DOMAINS[@]}" > "$VALIDATION"
     }
-    for interruption in after_record after_config save_failure none; do
+    for interruption in after_record after_config save_failure final_verification_failure none; do
         DOMAIN=old.example.com
         SITE_DOMAINS=(first.example.com "$DOMAIN")
         LOCAL_PORT=8443
@@ -370,7 +370,7 @@ printf 'PASS 确认期间变化：手工编辑、并发新部署和部署记录�
         set +e
         (
             set -e
-            if [[ "$interruption" == save_failure ]]; then
+            if [[ "$interruption" == save_failure || "$interruption" == final_verification_failure ]]; then
                 trap cleanup_deploy EXIT
                 sync() {
                     if [[ "${*: -1}" == "$CONFIG" && ! -e "$base/sync-failed" ]]; then
@@ -395,30 +395,33 @@ printf 'PASS 确认期间变化：手工编辑、并发新部署和部署记录�
         set -e
         check_ownership
         [[ "$LOCAL_PORT" == 8443 ]]
-        if [[ "$interruption" == save_failure ]]; then
-            [[ "$result" == 1 && "$DOMAIN" == old.example.com && ${#SITE_DOMAINS[@]} == 2 ]]
+        if [[ "$interruption" == save_failure || "$interruption" == final_verification_failure ]]; then
+            if [[ "$interruption" == save_failure ]]; then [[ "$result" == 1 ]]; else [[ "$result" == 2 ]]; fi
+            [[ "$DOMAIN" == old.example.com && ${#SITE_DOMAINS[@]} == 2 ]]
             [[ $(sha256sum "$CONFIG" | awk '{print $1}') == "$original_config_hash" ]]
             [[ $(sha256sum "$STATE" | awk '{print $1}') == "$original_state_hash" ]]
             continue
         fi
-        [[ $(state_value cert_mode) == http-multi ]]
         if [[ "$interruption" == after_record ]]; then
             [[ "$result" == 75 && "$DOMAIN" == old.example.com && ${#SITE_DOMAINS[@]} == 2 ]]
+            [[ ${SITE_DOMAINS[0]} == first.example.com && ${SITE_DOMAINS[1]} == old.example.com ]]
+            [[ $(state_value cert_mode) == http-multi ]]
         else
-            [[ "$DOMAIN" == new.example.com && ${#SITE_DOMAINS[@]} == 3 ]]
+            [[ "$DOMAIN" == new.example.com && ${#SITE_DOMAINS[@]} == 1 && ${SITE_DOMAINS[0]} == new.example.com ]]
+            [[ $(<"$CONFIG") != *first.example.com* && $(<"$CONFIG") != *old.example.com* ]]
+            [[ $(<"$CONFIG") == *'default_sni new.example.com'* ]]
             if [[ "$interruption" == after_config ]]; then
-                [[ "$result" == 75 && -n $(state_value previous_config_sha256) ]]
+                [[ "$result" == 75 && -n $(state_value previous_config_sha256) && $(state_value cert_mode) == http-multi ]]
             else
-                [[ "$result" == 0 && -z $(state_value previous_config_sha256) ]]
+                [[ "$result" == 0 && -z $(state_value previous_config_sha256) && $(state_value cert_mode) == http ]]
             fi
         fi
-        [[ ${SITE_DOMAINS[0]} == first.example.com && ${SITE_DOMAINS[1]} == old.example.com ]]
     done
     printf '# manual edit\n' >> "$CONFIG"
     if output=$(check_ownership 2>&1); then exit 1; fi
     [[ "$output" == *被手工改过* ]]
 )
-printf 'PASS 换域名：保存中断后识别磁盘上的有效配置，保留原域名并保护人工修改\n'
+printf 'PASS 换域名：中断后识别有效配置，失败恢复原站点，成功只保留新域名\n'
 
 write_caddyfile example.com 8443 '' > "$WORK/production.Caddyfile"
 "$CADDY_BIN" fmt --overwrite "$WORK/production.Caddyfile"
