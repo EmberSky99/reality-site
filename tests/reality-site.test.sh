@@ -338,6 +338,88 @@ printf 'PASS 部署边界：预装Caddy/服务/网站文件均停止且保留原
 )
 printf 'PASS 确认期间变化：手工编辑、并发新部署和部署记录变化均在写入前停止\n'
 
+(
+    # Stop after either rename, bypassing cleanup as in a hard shutdown.
+    base="$WORK/interrupted-domain-change"
+    CONFIG="$base/Caddyfile"
+    STATE="$base/state"
+    WEBROOT="$base/www"
+    BACKUP_ROOT="$base/backups"
+    mkdir -p "$base"
+    check_caddy_unit() { :; }
+    systemctl() { :; }
+    caddy() { :; }
+    sync() { :; }
+    has() { return 1; }
+    wait_for_https() { :; }
+    prepare_site_config() {
+        VALIDATION=$(mktemp "$base/next-config.XXXXXXXX")
+        write_caddyfile "$DOMAIN" "$LOCAL_PORT" "$EMAIL" "$WEBROOT" "${SITE_DOMAINS[@]}" > "$VALIDATION"
+    }
+    for interruption in after_record after_config save_failure none; do
+        DOMAIN=old.example.com
+        SITE_DOMAINS=(first.example.com "$DOMAIN")
+        LOCAL_PORT=8443
+        EMAIL=''
+        write_caddyfile "$DOMAIN" "$LOCAL_PORT" "$EMAIL" "$WEBROOT" "${SITE_DOMAINS[@]}" > "$CONFIG"
+        # Simulate a multi-domain deployment made before the downgrade guard.
+        write_state active | sed 's/^cert_mode=http-multi$/cert_mode=http/' > "$STATE"
+        check_ownership
+        original_config_hash=$(sha256sum "$CONFIG" | awk '{print $1}')
+        original_state_hash=$(sha256sum "$STATE" | awk '{print $1}')
+        set +e
+        (
+            set -e
+            if [[ "$interruption" == save_failure ]]; then
+                trap cleanup_deploy EXIT
+                sync() {
+                    if [[ "${*: -1}" == "$CONFIG" && ! -e "$base/sync-failed" ]]; then
+                        touch "$base/sync-failed"
+                        return 1
+                    fi
+                }
+            else
+                trap - EXIT
+            fi
+            mv() {
+                command mv "$@" || return
+                if [[ ( "$interruption" == after_record && "$*" == *'.reality-site-transition.'* ) ||
+                      ( "$interruption" == after_config && "${*: -1}" == "$CONFIG" ) ]]; then
+                    exit 75
+                fi
+            }
+            DOMAIN=new.example.com
+            change_site_domain old.example.com "$original_config_hash" "$original_state_hash"
+        ) > "$base/output" 2>&1
+        result=$?
+        set -e
+        check_ownership
+        [[ "$LOCAL_PORT" == 8443 ]]
+        if [[ "$interruption" == save_failure ]]; then
+            [[ "$result" == 1 && "$DOMAIN" == old.example.com && ${#SITE_DOMAINS[@]} == 2 ]]
+            [[ $(sha256sum "$CONFIG" | awk '{print $1}') == "$original_config_hash" ]]
+            [[ $(sha256sum "$STATE" | awk '{print $1}') == "$original_state_hash" ]]
+            continue
+        fi
+        [[ $(state_value cert_mode) == http-multi ]]
+        if [[ "$interruption" == after_record ]]; then
+            [[ "$result" == 75 && "$DOMAIN" == old.example.com && ${#SITE_DOMAINS[@]} == 2 ]]
+        else
+            [[ "$DOMAIN" == new.example.com && ${#SITE_DOMAINS[@]} == 3 ]]
+            if [[ "$interruption" == after_config ]]; then
+                [[ "$result" == 75 && -n $(state_value previous_config_sha256) ]]
+            else
+                [[ "$result" == 0 && -z $(state_value previous_config_sha256) ]]
+            fi
+        fi
+        [[ ${SITE_DOMAINS[0]} == first.example.com && ${SITE_DOMAINS[1]} == old.example.com ]]
+    done
+    printf '# manual edit\n' >> "$CONFIG"
+    if output=$(check_ownership 2>&1); then exit 1; fi
+    [[ "$output" == *被手工改过* ]]
+)
+printf 'PASS 换域名：保存中断后识别磁盘上的有效配置，保留原域名并保护人工修改\n'
+
 write_caddyfile example.com 8443 '' > "$WORK/production.Caddyfile"
 "$CADDY_BIN" fmt --overwrite "$WORK/production.Caddyfile"
 "$CADDY_BIN" adapt --config "$WORK/production.Caddyfile" --adapter caddyfile > "$WORK/config.json"

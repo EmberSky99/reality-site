@@ -22,6 +22,8 @@ curl -fL https://raw.githubusercontent.com/tinkerlab-tech/reality-site/main/real
 
 原域名继续由 Caddy 提供 HTTPS，已有客户端可以按自己的时间切换。换域名失败时，脚本恢复原 Caddy 配置。已经手工修改过 Caddyfile 的站点需要人工合并。留空域名并回车仍是修复当前站点。
 
+如果换域名时 VPS 意外重启，用上面的命令重新下载并运行即可。脚本会识别已经保存的配置，可直接回车修复或再次输入新域名。多域名站点请使用最新版脚本，旧版可能因无法识别部署记录而退出。
+
 ## 准备与演示顺序
 
 1. 准备 VPS，将域名的 A/AAAA 解析到这台 VPS，关闭 CDN 代理。

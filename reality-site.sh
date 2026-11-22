@@ -22,6 +22,7 @@ BACKUP=''
 STAGE=''
 VALIDATION=''
 STATE_UPDATE=''
+STATE_TRANSITION=''
 CADDY_INSTALL_MASKED=0
 CADDY_INSTALLED_NEW=0
 CADDY_CONFIG_APPLIED=0
@@ -34,9 +35,15 @@ has() { command -v "$1" >/dev/null 2>&1; }
 state_value() { awk -F= -v key="$1" '$1 == key {print substr($0, index($0, "=") + 1); exit}' "$STATE"; }
 
 write_state() {
-    printf 'domain=%s\nlocal_port=%s\nemail=%s\ncert_mode=http\nstatus=%s\nconfig_sha256=%s\n' \
-        "$DOMAIN" "$LOCAL_PORT" "$EMAIL" "${1:-active}" \
-        "$(sha256sum "${2:-$CONFIG}" | awk '{print $1}')"
+    local status="${1:-active}" config="${2:-$CONFIG}" config_hash='' certificate_mode=http
+    if [[ "$status" != pending || -e "$config" ]]; then
+        config_hash=$(sha256sum "$config" | awk '{print $1}') || return 1
+    fi
+    # Older installers know only http and refuse unfamiliar modes. A multi-name
+    # site must not be rewritten as a single-name site by an old copy.
+    if (( ${#SITE_DOMAINS[@]} > 1 )); then certificate_mode=http-multi; fi
+    printf 'domain=%s\nlocal_port=%s\nemail=%s\ncert_mode=%s\nstatus=%s\nconfig_sha256=%s\n' \
+        "$DOMAIN" "$LOCAL_PORT" "$EMAIL" "$certificate_mode" "$status" "$config_hash"
     if (( ${#SITE_DOMAINS[@]} > 1 )); then
         local IFS=' '
         printf 'site_domains=%s\n' "${SITE_DOMAINS[*]}"
@@ -182,22 +189,30 @@ check_platform() {
 }
 
 check_ownership() {
-    local certificate_mode site_domain found=0
+    local certificate_mode config_hash key_prefix='' site_domain found=0
     MANAGED=0
     [[ ! -L "$CONFIG" && ! -L "$STATE" && ! -L "$WEBROOT" ]] || die '配置或网站路径是符号链接，需要人工确认。'
     if [[ -f "$STATE" ]]; then
         [[ -f "$CONFIG" ]] || die '找到部署记录但没有 Caddyfile，需要人工确认。'
-        [[ $(state_value config_sha256) == "$(sha256sum "$CONFIG" | awk '{print $1}')" ]] ||
-            die 'Caddyfile 在上次部署后被手工改过；为保留这些改动，脚本停止。'
+        config_hash=$(sha256sum "$CONFIG" | awk '{print $1}') || die '无法读取 Caddyfile 的校验值。'
+        certificate_mode=$(state_value cert_mode)
+        if [[ $(state_value config_sha256) != "$config_hash" ]]; then
+            if [[ "$certificate_mode" == http-multi && $(state_value previous_config_sha256) == "$config_hash" ]]; then
+                # A stopped migration may have published the transition record
+                # before replacing Caddyfile. Recover the name(s) of that file.
+                key_prefix=previous_
+            else
+                die 'Caddyfile 在上次部署后被手工改过；为保留这些改动，脚本停止。'
+            fi
+        fi
         MANAGED=1
-        DOMAIN=$(state_value domain)
+        DOMAIN=$(state_value "${key_prefix}domain")
         LOCAL_PORT=$(state_value local_port)
         EMAIL=$(state_value email)
-        certificate_mode=$(state_value cert_mode)
-        [[ -z "$certificate_mode" || "$certificate_mode" == http ]] ||
+        [[ -z "$certificate_mode" || "$certificate_mode" == http || "$certificate_mode" == http-multi ]] ||
             die '此精简版只支持 HTTP-01，不能自动更新其他证书验证方式的旧部署；原配置和续期任务保持原样，请先人工迁移。'
         if ! valid_domain "$DOMAIN" || ! valid_port "$LOCAL_PORT"; then die '已有部署记录内容异常。'; fi
-        read -r -a SITE_DOMAINS <<< "$(state_value site_domains)"
+        read -r -a SITE_DOMAINS <<< "$(state_value "${key_prefix}site_domains")"
         if (( ${#SITE_DOMAINS[@]} == 0 )); then SITE_DOMAINS=("$DOMAIN"); fi
         for site_domain in "${SITE_DOMAINS[@]}"; do
             valid_domain "$site_domain" || die '已有部署记录中的其他域名格式异常。'
@@ -342,6 +357,7 @@ cleanup_deploy() {
     fi
     [[ -z "$VALIDATION" ]] || rm -f -- "$VALIDATION"
     [[ -z "$STATE_UPDATE" ]] || rm -f -- "$STATE_UPDATE"
+    [[ -z "$STATE_TRANSITION" ]] || rm -f -- "$STATE_TRANSITION"
     [[ -z "$STAGE" ]] || rm -rf -- "$STAGE"
 }
 
@@ -596,7 +612,12 @@ verify_site() {
 
 restore_domain_change() {
     if [[ "$DOMAIN_CHANGE_PHASE" == saving ]]; then
-        if ! cp -p -- "$BACKUP/Caddyfile" "$CONFIG" || ! cp -p -- "$BACKUP/state" "$STATE"; then
+        if ! { cp -p -- "$BACKUP/Caddyfile" "$VALIDATION" &&
+               cp -p -- "$BACKUP/state" "$STATE_UPDATE" &&
+               mv -fT -- "$VALIDATION" "$CONFIG" &&
+               { ! has restorecon || restorecon "$CONFIG"; } &&
+               sync -f -- "$CONFIG" &&
+               mv -fT -- "$STATE_UPDATE" "$STATE"; }; then
             printf '\n恢复部署文件失败。原文件备份：%s\n' "$BACKUP" >&2
         fi
     fi
@@ -608,7 +629,9 @@ restore_domain_change() {
 }
 
 change_site_domain() {
-    local old_domain="$1" expected_config_hash="$2" expected_state_hash="$3" previous
+    local old_domain="$1" expected_config_hash="$2" expected_state_hash="$3" previous old_names
+    local IFS=' '
+    old_names=${SITE_DOMAINS[*]}
     check_caddy_unit
     systemctl is-active --quiet caddy || die '换域名需要原站点正在运行；请先用原域名重跑修复。'
     for previous in "${SITE_DOMAINS[@]}"; do
@@ -624,14 +647,25 @@ change_site_domain() {
     wait_for_https || exit "$?"
     STATE_UPDATE=$(mktemp "$(dirname "$STATE")/.reality-site-state.XXXXXXXX")
     write_state active "$VALIDATION" > "$STATE_UPDATE"
+    STATE_TRANSITION=$(mktemp "$(dirname "$STATE")/.reality-site-transition.XXXXXXXX")
+    {
+        cat "$STATE_UPDATE"
+        printf 'previous_domain=%s\nprevious_site_domains=%s\nprevious_config_sha256=%s\n' \
+            "$old_domain" "$old_names" "$expected_config_hash"
+    } > "$STATE_TRANSITION"
     [[ ! -L "$CONFIG" && ! -L "$STATE" &&
        "$(sha256sum "$CONFIG" | awk '{print $1}')" == "$expected_config_hash" &&
        "$(sha256sum "$STATE" | awk '{print $1}')" == "$expected_state_hash" ]] ||
         die '等待证书期间部署文件发生变化，本次停止保存。'
 
     DOMAIN_CHANGE_PHASE=saving
+    # Flush the record that recognizes both configurations before replacing the
+    # config, then flush the config before dropping the previous record.
+    mv -fT -- "$STATE_TRANSITION" "$STATE"
+    sync -f -- "$STATE"
     mv -fT -- "$VALIDATION" "$CONFIG"
     if has restorecon; then restorecon "$CONFIG"; fi
+    sync -f -- "$CONFIG"
     mv -fT -- "$STATE_UPDATE" "$STATE"
     DOMAIN_CHANGE_PHASE=''
     printf '\n新域名 %s 已就绪，旧域名 %s 仍可用。按需在入站和客户端配置新 SNI。\n' "$DOMAIN" "$old_domain"
