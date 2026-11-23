@@ -97,7 +97,7 @@ CentOS Linux 7/8、CentOS Stream 8、Debian 10、Alpine/OpenRC、Arch 和 openSU
 
 ## 排查
 
-查看 Caddy 日志：
+HTTPS 验证失败时，脚本会显示本机请求的错误或 HTTP 状态码，以及最近 10 条 Caddy 日志。需要更多上下文时可以查看：
 
 ```bash
 journalctl -u caddy -n 60 --no-pager

@@ -562,8 +562,22 @@ apply_site() {
     systemctl enable caddy
 }
 
+show_https_failure() {
+    local status="$1" error_file="$2"
+    if [[ -s "$error_file" ]]; then
+        printf '\n本机 HTTPS 请求失败：%s\n' "$(<"$error_file")" >&2
+    elif [[ -n "$status" ]]; then
+        printf '\n本机 HTTPS 返回 HTTP %s（预期 200）。\n' "$status" >&2
+    fi
+    if has journalctl; then
+        printf '\n最近 10 条 Caddy 日志\n' >&2
+        journalctl -u caddy -n 10 --no-pager -o cat >&2 || true
+    fi
+}
+
 wait_for_https() {
     local mode="${1:-issuance}" attempts=18 attempt status version
+    local error_file="$STAGE/https-probe.stderr"
     if [[ "$mode" == final ]]; then
         attempts=3
     else
@@ -572,7 +586,7 @@ wait_for_https() {
     for ((attempt=1; attempt<=attempts; attempt++)); do
         if status=$(curl --noproxy '*' --silent --show-error --max-time 3 \
             --resolve "$DOMAIN:$LOCAL_PORT:127.0.0.1" -o /dev/null -w '%{http_code}' \
-            "https://$DOMAIN:$LOCAL_PORT/" 2>/dev/null) && [[ "$status" == 200 ]]; then
+            "https://$DOMAIN:$LOCAL_PORT/" 2>"$error_file") && [[ "$status" == 200 ]]; then
             if [[ "$mode" == final ]]; then return 0; fi
             say '本机 HTTPS 验证成功（仅服务器内部）：证书受信任、域名匹配、网页返回 HTTP 200。'
             if [[ $(curl --version) == *HTTP2* ]]; then
@@ -590,11 +604,13 @@ wait_for_https() {
     done
     if [[ "$mode" == final ]]; then
         printf '\n新域名在最终配置下未通过 HTTPS 验证，正在回退。\n' >&2
+        show_https_failure "$status" "$error_file"
         return 2
     fi
     printf '\nCaddy 已启动，但本机 HTTPS 尚未验证成功；不能据此认为证书已签发。\n'
     printf '先检查 DNS 的全部 A/AAAA、TCP 80 的本机防火墙和云端安全组、域名的 CAA 限制。\n'
     printf '查看原因：journalctl -u caddy -n 60 --no-pager\n'
+    show_https_failure "$status" "$error_file"
     return 2
 }
 

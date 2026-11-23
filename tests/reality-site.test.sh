@@ -423,6 +423,37 @@ printf 'PASS 确认期间变化：手工编辑、并发新部署和部署记录�
 )
 printf 'PASS 换域名：中断后识别有效配置，失败恢复原站点，成功只保留新域名\n'
 
+(
+    STAGE="$WORK"
+    DOMAIN=example.com
+    sleep() { :; }
+    journalctl() { printf 'test Caddy certificate log\n'; return 1; }
+    curl() {
+        if [[ "$1" == --version ]]; then printf 'curl fixture\n'; return 0; fi
+        case "$scenario" in
+            success) printf '200'; printf 'unrelated diagnostic\n' >&2 ;;
+            tls) printf '000'; printf 'curl: (60) certificate verify failed\n' >&2; return 60 ;;
+            http) printf '403' ;;
+        esac
+    }
+    for scenario in success tls http; do
+        result=0
+        output=$(wait_for_https 2>&1) || result=$?
+        case "$scenario" in
+            success)
+                [[ "$result" == 0 && "$output" != *'test Caddy certificate log'* &&
+                   "$output" != *'unrelated diagnostic'* ]] ;;
+            tls)
+                [[ "$result" == 2 && "$output" == *'certificate verify failed'* &&
+                   "$output" == *'test Caddy certificate log'* ]] ;;
+            http)
+                [[ "$result" == 2 && "$output" == *'HTTP 403'* &&
+                   "$output" == *'test Caddy certificate log'* ]] ;;
+        esac
+    done
+)
+printf 'PASS HTTPS 验证失败时显示具体请求错误和 Caddy 日志，正常验证输出保持原样\n'
+
 write_caddyfile example.com 8443 '' > "$WORK/production.Caddyfile"
 "$CADDY_BIN" fmt --overwrite "$WORK/production.Caddyfile"
 "$CADDY_BIN" adapt --config "$WORK/production.Caddyfile" --adapter caddyfile > "$WORK/config.json"
