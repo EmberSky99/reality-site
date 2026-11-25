@@ -274,7 +274,7 @@ ask_settings() {
     check_available
     getent ahosts "$DOMAIN" >/dev/null || die '本机无法解析该域名。请确认 A/AAAA 记录后重试。'
     say '=== 即将执行的部署 ==='
-    printf '域名：%s\n本机网站：127.0.0.1:%s\n网页目录：%s\n' "$DOMAIN" "$LOCAL_PORT" "$WEBROOT"
+    printf '域名：%s\n本机网站：0.0.0.0:%s\n网页目录：%s\n' "$DOMAIN" "$LOCAL_PORT" "$WEBROOT"
     if (( MANAGED )); then
         if [[ "$DOMAIN" != "$old_domain" ]]; then
             printf '更换域名：%s → %s。复用原网页和端口。换成功后本站只保留新域名，仍用旧 SNI 的客户端需切换。\n' "$old_domain" "$DOMAIN"
@@ -393,7 +393,7 @@ EOF
     done
     cat <<EOF
 https://:$port {
-    bind 127.0.0.1
+    bind 0.0.0.0
 EOF
     cat <<EOF
     root * $root
@@ -585,13 +585,13 @@ wait_for_https() {
     fi
     for ((attempt=1; attempt<=attempts; attempt++)); do
         if status=$(curl --noproxy '*' --silent --show-error --max-time 3 \
-            --resolve "$DOMAIN:$LOCAL_PORT:127.0.0.1" -o /dev/null -w '%{http_code}' \
+            --resolve "$DOMAIN:$LOCAL_PORT:0.0.0.0" -o /dev/null -w '%{http_code}' \
             "https://$DOMAIN:$LOCAL_PORT/" 2>"$error_file") && [[ "$status" == 200 ]]; then
             if [[ "$mode" == final ]]; then return 0; fi
             say '本机 HTTPS 验证成功（仅服务器内部）：证书受信任、域名匹配、网页返回 HTTP 200。'
             if [[ $(curl --version) == *HTTP2* ]]; then
                 version=$(curl --noproxy '*' --http2 --silent --show-error --max-time 5 \
-                    --resolve "$DOMAIN:$LOCAL_PORT:127.0.0.1" -o /dev/null -w '%{http_version}' \
+                    --resolve "$DOMAIN:$LOCAL_PORT:0.0.0.0" -o /dev/null -w '%{http_version}' \
                     "https://$DOMAIN:$LOCAL_PORT/")
                 printf '实际协商的 HTTP 版本：%s\n' "$version"
                 [[ "$version" == 2 ]] || die '没有协商到 HTTP/2，请检查配置。'
@@ -615,7 +615,7 @@ wait_for_https() {
 }
 
 print_site_result() {
-    printf '\n下一阶段在 3X-UI 填：\n  SNI：%s\n  Target/Dest：127.0.0.1:%s\n  Xver：0\n' "$DOMAIN" "$LOCAL_PORT"
+    printf '\n下一阶段在 3X-UI 填：\n  SNI：%s\n  Target/Dest：0.0.0.0:%s\n  Xver：0\n' "$DOMAIN" "$LOCAL_PORT"
     printf '网页目录：%s（首页文件：index.html）\n配置备份：%s\n' "$WEBROOT" "$BACKUP"
     printf '自定义网页：通过SSH工具的文件管理器上传HTML、CSS、JS和图片，保存后刷新浏览器即可。\n'
     printf '只改网页无需重跑脚本；再次部署会保留已有网页内容。\n'
